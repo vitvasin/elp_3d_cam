@@ -63,6 +63,9 @@ class DepthEngine:
         # Last computed frame state (set by compute()).
         self.disparity = None      # float32, true disparity in px, NaN = invalid
         self.depth_map = None      # float32 (h, w), Z in mm, NaN = invalid
+        # Colormap used by colorized(). Write from GUI thread; int assign is
+        # GIL-atomic so the worker reading it on the next frame is safe.
+        self.colormap = cv2.COLORMAP_TURBO
 
     def _build_matchers(self):
         s = self._cfg["sgbm"]
@@ -172,6 +175,6 @@ class DepthEngine:
         norm = np.clip((depth - rmin) / max(rmax - rmin, 1e-6), 0, 1)
         norm = np.nan_to_num(norm, nan=0.0)
         vis = (norm * 255).astype(np.uint8)
-        color = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
+        color = cv2.applyColorMap(vis, self.colormap)
         color[~np.isfinite(depth)] = (0, 0, 0)  # invalid -> black
         return color

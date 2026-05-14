@@ -5,12 +5,25 @@ constraints -- numDisparities must be a multiple of 16 and blockSize must be odd
 -- which a free slider cannot express cleanly.
 """
 
+import cv2
 from PyQt5.QtWidgets import (
-    QCheckBox, QFormLayout, QGroupBox, QLabel, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFormLayout, QGroupBox, QLabel, QPushButton,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..depth import WLS_AVAILABLE
+
+# Ordered list of (label, cv2 constant). TURBO/MAGMA/INFERNO/PLASMA require OpenCV >= 4.1.
+_COLORMAPS = [
+    ("TURBO",    cv2.COLORMAP_TURBO),
+    ("JET",      cv2.COLORMAP_JET),
+    ("MAGMA",    cv2.COLORMAP_MAGMA),
+    ("INFERNO",  cv2.COLORMAP_INFERNO),
+    ("PLASMA",   cv2.COLORMAP_PLASMA),
+    ("HOT",      cv2.COLORMAP_HOT),
+    ("BONE",     cv2.COLORMAP_BONE),
+    ("RAINBOW",  cv2.COLORMAP_RAINBOW),
+]
 
 
 class DepthWidget(QWidget):
@@ -24,6 +37,17 @@ class DepthWidget(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+
+        # --- Colormap selector -------------------------------------------
+        cmap_box = QGroupBox("Depth colormap")
+        cmap_form = QFormLayout(cmap_box)
+        self.cmap_combo = QComboBox()
+        for label, _ in _COLORMAPS:
+            self.cmap_combo.addItem(label)
+        self.cmap_combo.setCurrentText("TURBO")
+        self.cmap_combo.currentIndexChanged.connect(self._on_colormap_changed)
+        cmap_form.addRow("Colormap", self.cmap_combo)
+        layout.addWidget(cmap_box)
 
         s = self.cfg["depth"]["sgbm"]
         params = QGroupBox("StereoSGBM parameters")
@@ -83,9 +107,10 @@ class DepthWidget(QWidget):
     def set_depth_engine(self, engine):
         self.depth_engine = engine
         self.setEnabled(True)
-        # Push the current slider values into the fresh engine so a calibration
-        # load (including startup autoload) does not reset user-tuned params.
+        # Push current widget state into the fresh engine (calibration load
+        # must not reset user-tuned params or colormap choice).
         self.apply_params()
+        self._on_colormap_changed()
 
     def apply_params(self):
         if self.depth_engine is None:
@@ -114,6 +139,12 @@ class DepthWidget(QWidget):
         self.lbl_range.setText(
             f"detection range: {rmin:.0f} - {rmax:.0f} mm"
         )
+
+    def _on_colormap_changed(self, _index=None):
+        if self.depth_engine is None:
+            return
+        idx = self.cmap_combo.currentIndex()
+        self.depth_engine.colormap = _COLORMAPS[idx][1]
 
     def show_pixel_info(self, info):
         rmin = info.range_min_mm
