@@ -1,0 +1,6 @@
+# System cv2 (4.6.0) already provides aruco + ximgproc on this machine.
+# If running elsewhere without contrib modules, install:
+#   pip install opencv-contrib-python   (and `pip uninstall opencv-python` if both present)
+numpy
+PyQt5
+pyyaml

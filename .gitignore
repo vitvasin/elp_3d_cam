@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+.env
+.venv/
+env/
+
+# Calibration output (auto-generated, not source)
+config/stereo_calib.yaml
+
+# Captured image datasets
+images/
+data/
+
+*.log
