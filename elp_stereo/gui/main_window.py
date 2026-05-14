@@ -5,9 +5,18 @@ import os
 import cv2
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QAction, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QTabWidget,
-    QVBoxLayout, QWidget,
+    QAction, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QTabWidget, QVBoxLayout, QWidget,
 )
+
+# (label, show_left, show_right, show_depth)
+_VIEW_MODES = [
+    ("All",   True,  True,  True),
+    ("Left",  True,  False, False),
+    ("Right", False, True,  False),
+    ("Both",  True,  True,  False),
+    ("Depth", False, False, True),
+]
 
 from ..calibration import load_yaml
 from ..camera import CaptureThread, StereoCamera
@@ -74,6 +83,14 @@ class MainWindow(QMainWindow):
         act_load.triggered.connect(self.load_calibration_dialog)
         toolbar.addAction(act_load)
 
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" View: "))
+        self.view_combo = QComboBox()
+        for label, *_ in _VIEW_MODES:
+            self.view_combo.addItem(label)
+        self.view_combo.currentIndexChanged.connect(self._apply_view_mode)
+        toolbar.addWidget(self.view_combo)
+
         self.status = QLabel("Idle")
         self.statusBar().addWidget(self.status)
 
@@ -82,6 +99,14 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self.process_tick)
+
+    def _apply_view_mode(self, index=None):
+        if index is None:
+            index = self.view_combo.currentIndex()
+        _, show_l, show_r, show_d = _VIEW_MODES[index]
+        self.left_panel.setVisible(show_l)
+        self.right_panel.setVisible(show_r)
+        self.depth_panel.setVisible(show_d)
 
     # -------------------------------------------------------------- camera
     def toggle_camera(self):
