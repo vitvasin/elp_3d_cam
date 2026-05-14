@@ -138,30 +138,30 @@ class DepthEngine:
         range_max = f * b / d_near
         return range_min, range_max
 
-    def pixel_info(self, x, y):
-        """Depth + uncertainty band + detection range at pixel ``(x, y)``."""
+    def pixel_info_from_map(self, depth_map, x, y):
+        """Depth + uncertainty at ``(x, y)`` using an externally supplied depth map.
+
+        Use this from the GUI thread with a snapshot copy from the worker so
+        reads never race with the worker writing ``self.depth_map``.
+        """
         rmin, rmax = self.detection_range()
-        if self.depth_map is None:
+        if depth_map is None:
             return PixelInfo(valid=False, range_min_mm=rmin, range_max_mm=rmax)
-        h, w = self.depth_map.shape
+        h, w = depth_map.shape
         if not (0 <= x < w and 0 <= y < h):
             return PixelInfo(valid=False, range_min_mm=rmin, range_max_mm=rmax)
-
-        z = float(self.depth_map[y, x])
+        z = float(depth_map[y, x])
         if not np.isfinite(z) or z <= 0:
             return PixelInfo(valid=False, range_min_mm=rmin, range_max_mm=rmax)
-
-        # dz = z^2 / (f*B) * delta_d  -- error grows with the square of depth.
         f = self.rectifier.fx
         b = self.rectifier.baseline
         error = (z * z) / (f * b) * self.delta_d
-        return PixelInfo(
-            valid=True,
-            depth_mm=z,
-            error_mm=error,
-            range_min_mm=rmin,
-            range_max_mm=rmax,
-        )
+        return PixelInfo(valid=True, depth_mm=z, error_mm=error,
+                         range_min_mm=rmin, range_max_mm=rmax)
+
+    def pixel_info(self, x, y):
+        """Depth + uncertainty band + detection range at pixel ``(x, y)``."""
+        return self.pixel_info_from_map(self.depth_map, x, y)
 
     def colorized(self):
         """BGR colormap of the last depth map for display."""

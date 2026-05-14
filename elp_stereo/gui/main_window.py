@@ -13,6 +13,7 @@ from ..calibration import load_yaml
 from ..camera import CaptureThread, StereoCamera
 from ..config import project_root
 from ..depth import DepthEngine, Rectifier
+from ..worker import DepthWorker
 from .calib_widget import CalibWidget
 from .depth_widget import DepthWidget
 from .widgets import ImagePanel
@@ -29,8 +30,10 @@ class MainWindow(QMainWindow):
         self.capture_thread = None
         self.rectifier = None
         self.depth_engine = None
+        self.depth_worker = None
+
         self.latest_raw = None        # (left, right) most recent grabbed pair
-        self.latest_rect = None       # (left_rect, right_rect)
+        self._latest_depth_map = None # snapshot from last worker result
         self._depth_click = None      # (x, y) crosshair on the depth panel
 
         self._build_ui()
@@ -74,8 +77,10 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Idle")
         self.statusBar().addWidget(self.status)
 
+        # Lightweight timer: only used to push raw frames when no calibration
+        # is loaded. With calibration, the depth worker drives all 3 panels.
         self.timer = QTimer(self)
-        self.timer.setInterval(33)  # ~30 Hz processing cap
+        self.timer.setInterval(33)
         self.timer.timeout.connect(self.process_tick)
 
     # -------------------------------------------------------------- camera
@@ -95,15 +100,20 @@ class MainWindow(QMainWindow):
         self.capture_thread.frames_ready.connect(self.on_frames_ready)
         self.capture_thread.error.connect(self.on_capture_error)
         self.capture_thread.start()
+
+        if self.rectifier is not None:
+            self._start_depth_worker()
+
         self.timer.start()
         self.act_start.setText("Stop")
         msg = f"Capturing ({self.camera.mode})"
         if self.camera.unsynced:
-            msg += "  -  WARNING: frames may be unsynchronized"
+            msg += "  ⚠  frames may be unsynchronized"
         self.status.setText(msg)
 
     def stop_camera(self):
         self.timer.stop()
+        self._stop_depth_worker()
         if self.capture_thread is not None:
             self.capture_thread.stop()
             self.capture_thread = None
@@ -114,38 +124,50 @@ class MainWindow(QMainWindow):
 
     def on_frames_ready(self, left, right):
         self.latest_raw = (left, right)
+        if self.depth_worker is not None:
+            self.depth_worker.submit(left, right)
 
     def on_capture_error(self, msg):
         self.status.setText(f"Capture: {msg}")
 
-    # ------------------------------------------------------------ pipeline
+    # ---------------------------------------------------------- depth worker
+    def _start_depth_worker(self):
+        self._stop_depth_worker()
+        self.depth_worker = DepthWorker(self.rectifier, self.depth_engine)
+        self.depth_worker.result_ready.connect(self.on_depth_result)
+        self.depth_worker.start()
+
+    def _stop_depth_worker(self):
+        if self.depth_worker is not None:
+            self.depth_worker.stop()
+            self.depth_worker = None
+
+    def on_depth_result(self, result):
+        """Called in GUI thread when a depth frame is ready."""
+        self._latest_depth_map = result["depth_map"]
+        self.left_panel.show_image(result["left"])
+        self.right_panel.show_image(result["right"])
+
+        color = result["color"]
+        if color is not None:
+            if self._depth_click is not None:
+                x, y = self._depth_click
+                cv2.drawMarker(color, (x, y), (255, 255, 255),
+                               cv2.MARKER_CROSS, 16, 1)
+            self.depth_panel.show_image(color)
+
+        if self._depth_click is not None:
+            self._update_pixel_readout(*self._depth_click)
+
+    # ------------------------------------------------------------ raw display
     def process_tick(self):
-        if self.latest_raw is None:
+        """Show raw (unrectified) frames when no calibration is loaded."""
+        if self.rectifier is not None or self.latest_raw is None:
             return
         left, right = self.latest_raw
-
-        if self.rectifier is not None:
-            lr, rr = self.rectifier.rectify(left, right)
-            self.latest_rect = (lr, rr)
-            self.left_panel.show_image(lr)
-            self.right_panel.show_image(rr)
-            self.depth_engine.compute(lr, rr)
-            color = self.depth_engine.colorized()
-            if color is not None:
-                if self._depth_click is not None:
-                    x, y = self._depth_click
-                    cv2.drawMarker(color, (x, y), (255, 255, 255),
-                                   cv2.MARKER_CROSS, 16, 1)
-                self.depth_panel.show_image(color)
-            # Refresh the readout for the held crosshair pixel.
-            if self._depth_click is not None:
-                info = self.depth_engine.pixel_info(*self._depth_click)
-                self.depth_widget.show_pixel_info(info)
-        else:
-            self.latest_rect = None
-            self.left_panel.show_image(left)
-            self.right_panel.show_image(right)
-            self.depth_panel.setText("Load calibration\nto enable depth")
+        self.left_panel.show_image(left)
+        self.right_panel.show_image(right)
+        self.depth_panel.setText("Load calibration\nto enable depth")
 
     # --------------------------------------------------------- calibration
     def _try_autoload_calibration(self):
@@ -170,17 +192,26 @@ class MainWindow(QMainWindow):
                 self.status.setText(f"Calibration load failed: {exc}")
 
     def apply_calibration(self, calib):
-        """Install a calibration result: build the rectifier + depth engine."""
+        """Install calibration: rebuild rectifier + depth engine + worker."""
         self.rectifier = Rectifier(calib)
         self.depth_engine = DepthEngine(self.cfg, self.rectifier)
         self.depth_widget.set_depth_engine(self.depth_engine)
+        # Restart worker only if camera is running.
+        if self.capture_thread is not None:
+            self._start_depth_worker()
 
     # --------------------------------------------------------------- depth
     def on_depth_click(self, x, y):
         self._depth_click = (x, y)
-        if self.depth_engine is not None:
-            info = self.depth_engine.pixel_info(x, y)
-            self.depth_widget.show_pixel_info(info)
+        self._update_pixel_readout(x, y)
+
+    def _update_pixel_readout(self, x, y):
+        if self.depth_engine is None:
+            return
+        # Use the snapshot depth_map stored from the last worker result so
+        # pixel_info never races with the worker writing a new depth_map.
+        info = self.depth_engine.pixel_info_from_map(self._latest_depth_map, x, y)
+        self.depth_widget.show_pixel_info(info)
 
     # ----------------------------------------------------------- shutdown
     def closeEvent(self, event):
