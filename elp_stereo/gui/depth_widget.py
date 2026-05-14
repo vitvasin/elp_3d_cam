@@ -15,14 +15,28 @@ from ..depth import WLS_AVAILABLE
 
 # Ordered list of (label, cv2 constant). TURBO/MAGMA/INFERNO/PLASMA require OpenCV >= 4.1.
 _COLORMAPS = [
-    ("TURBO",    cv2.COLORMAP_TURBO),
-    ("JET",      cv2.COLORMAP_JET),
-    ("MAGMA",    cv2.COLORMAP_MAGMA),
-    ("INFERNO",  cv2.COLORMAP_INFERNO),
-    ("PLASMA",   cv2.COLORMAP_PLASMA),
-    ("HOT",      cv2.COLORMAP_HOT),
-    ("BONE",     cv2.COLORMAP_BONE),
-    ("RAINBOW",  cv2.COLORMAP_RAINBOW),
+    ("TURBO",            cv2.COLORMAP_TURBO),
+    ("AUTUMN (warm)",    cv2.COLORMAP_AUTUMN),
+    ("HOT",              cv2.COLORMAP_HOT),
+    ("JET",              cv2.COLORMAP_JET),
+    ("MAGMA",            cv2.COLORMAP_MAGMA),
+    ("INFERNO",          cv2.COLORMAP_INFERNO),
+    ("PLASMA",           cv2.COLORMAP_PLASMA),
+    ("VIRIDIS",          cv2.COLORMAP_VIRIDIS),
+    ("PARULA",           cv2.COLORMAP_PARULA),
+    ("CIVIDIS",          cv2.COLORMAP_CIVIDIS),
+    ("RAINBOW",          cv2.COLORMAP_RAINBOW),
+    ("OCEAN",            cv2.COLORMAP_OCEAN),
+    ("BONE",             cv2.COLORMAP_BONE),
+    ("PINK",             cv2.COLORMAP_PINK),
+    ("SPRING",           cv2.COLORMAP_SPRING),
+    ("SUMMER",           cv2.COLORMAP_SUMMER),
+    ("WINTER",           cv2.COLORMAP_WINTER),
+    ("COOL",             cv2.COLORMAP_COOL),
+    ("HSV",              cv2.COLORMAP_HSV),
+    ("TWILIGHT",         cv2.COLORMAP_TWILIGHT),
+    ("TWILIGHT SHIFTED", cv2.COLORMAP_TWILIGHT_SHIFTED),
+    ("DEEPGREEN",        cv2.COLORMAP_DEEPGREEN),
 ]
 
 
