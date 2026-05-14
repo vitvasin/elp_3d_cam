@@ -120,6 +120,9 @@ class DepthWidget(QWidget):
 
     def set_depth_engine(self, engine):
         self.depth_engine = engine
+        if engine is None:
+            self.setEnabled(False)
+            return
         self.setEnabled(True)
         # Push current widget state into the fresh engine (calibration load
         # must not reset user-tuned params or colormap choice).

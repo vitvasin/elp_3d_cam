@@ -9,6 +9,17 @@ from PyQt5.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
+# Per-eye resolution presets shown in the toolbar.
+# Stored as (label, per_eye_width, per_eye_height).
+# Full SBS frame sent to the camera = (2*w, h).
+_RESOLUTIONS = [
+    ("1280 × 720",  1280, 720),
+    ("960 × 540",    960, 540),
+    ("640 × 480",    640, 480),
+    ("640 × 360",    640, 360),
+    ("320 × 240",    320, 240),
+]
+
 # (label, show_left, show_right, show_depth)
 _VIEW_MODES = [
     ("All",   True,  True,  True),
@@ -84,6 +95,14 @@ class MainWindow(QMainWindow):
         toolbar.addAction(act_load)
 
         toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Resolution: "))
+        self.res_combo = QComboBox()
+        for label, *_ in _RESOLUTIONS:
+            self.res_combo.addItem(label)
+        self.res_combo.currentIndexChanged.connect(self._on_resolution_changed)
+        toolbar.addWidget(self.res_combo)
+
+        toolbar.addSeparator()
         toolbar.addWidget(QLabel(" View: "))
         self.view_combo = QComboBox()
         for label, *_ in _VIEW_MODES:
@@ -99,6 +118,31 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self.process_tick)
+
+    def _on_resolution_changed(self, index):
+        _, w, h = _RESOLUTIONS[index]
+        self.cfg["camera"]["frame_width"] = w * 2   # full SBS frame
+        self.cfg["camera"]["frame_height"] = h
+        # Calibration remap maps are tied to the image size they were built at.
+        # Clear them so the user is not silently applying wrong maps.
+        was_calibrated = self.rectifier is not None
+        if was_calibrated:
+            self._stop_depth_worker()
+            self.rectifier = None
+            self.depth_engine = None
+            self.depth_widget.set_depth_engine(None)
+            self.depth_panel.setText("Resolution changed\nReload calibration to enable depth")
+        # Restart capture at new resolution if camera is running.
+        if self.capture_thread is not None:
+            self._stop_depth_worker()
+            self.capture_thread.stop()
+            self.capture_thread = None
+            self.camera = None
+            self.start_camera()
+        msg = f"Resolution set to {w}×{h} per eye"
+        if was_calibrated:
+            msg += " — calibration cleared, please reload"
+        self.status.setText(msg)
 
     def _apply_view_mode(self, index=None):
         if index is None:
