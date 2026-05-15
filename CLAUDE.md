@@ -40,12 +40,16 @@ elp_stereo/
   targets.py                    ChessboardTarget, CharucoTarget, build_target(kind, cfg).
   calibration.py                StereoCalibrator, CalibrationResult, save_yaml, load_yaml.
   depth.py                      Rectifier, DepthEngine, PixelInfo.
+  pipeline.py                   StereoPipeline (Headless API).
   worker.py                     DepthWorker (QThread) — background SGBM compute.
   gui/
     widgets.py                  ImagePanel (QLabel + click→image coords signal).
     main_window.py              MainWindow — top-level, wires all components.
     calib_widget.py             Calibration tab UI.
     depth_widget.py             Depth tab UI (SGBM sliders + pixel readout).
+
+examples/
+  headless_depth.py             Stand-alone integration example using StereoPipeline.
 ```
 
 ## Data / signal flow
@@ -81,6 +85,17 @@ left, right = cam.grab()          # returns (H,W,3) BGR pair or None
 cam.release()
 cam.mode        # "sbs" | "dual"
 cam.unsynced    # True if dual-device fallback (warn user)
+```
+
+### `StereoPipeline` (`pipeline.py`) — Headless API
+```python
+from elp_stereo import StereoPipeline
+pipe = StereoPipeline(config_path=None)
+pipe.load_calibration("config/stereo_calib.yaml")
+pipe.start()
+left, right, depth = pipe.grab_depth()  # rectified BGRs + float32 depth map
+color = pipe.get_colorized_depth()       # BGR color visualization
+pipe.stop()
 ```
 
 ### `CalibrationTarget` (`targets.py`)
@@ -120,11 +135,16 @@ rect.Q          # 4×4 reprojection matrix
 ```python
 engine = DepthEngine(cfg, rectifier)
 depth_map = engine.compute(left_rect, right_rect)   # float32 (H,W) mm, NaN=invalid
-color     = engine.colorized()                       # BGR COLORMAP_JET, black=invalid
+color     = engine.colorized()                       # BGR colormap, black=invalid
 rmin, rmax = engine.detection_range()               # (mm, mm)
 info = engine.pixel_info_from_map(depth_map, x, y) # PixelInfo (use snapshot copy)
-engine.update_params({"sgbm": {...}, "use_wls_filter": bool})
+engine.update_params({"sgbm": {...}, "min_depth_mm": 50, "temporal_frames": 5})
 ```
+
+- **SGBM Mode:** Uses `cv2.STEREO_SGBM_MODE_HH` (full 8-direction) for quality.
+- **Range Capping:** `min_depth_mm` and `max_depth_mm` act as a depth mask.
+- **Temporal Averaging:** `temporal_frames > 1` enables `1/sqrt(N)` noise reduction.
+- **Speckle Removal:** 3x3 median blur is applied to the depth map.
 
 ### `PixelInfo` fields
 `valid: bool, depth_mm, error_mm, range_min_mm, range_max_mm`
@@ -185,9 +205,11 @@ depth:
 
 ## Integration notes for future sessions
 
-- **ROS2 output:** `DepthWorker.result_ready` dict provides rectified BGR pairs and
-  float32 depth map ready to wrap in `sensor_msgs/Image` and `sensor_msgs/CameraInfo`.
-  Calibration `K1,D1,P1,R1` → left `CameraInfo`. `Q` matrix encodes stereo geometry.
+- **Headless Usage:** See `examples/headless_depth.py` for how to use `StereoPipeline`
+  without the GUI. Ideal for automation or background processing.
+- **ROS2 output:** `DepthWorker.result_ready` (GUI) or `StereoPipeline.grab_depth`
+  (Headless) provide rectified BGR pairs and float32 depth maps ready to wrap in
+  `sensor_msgs/Image`. Calibration `K1,D1,P1,R1` → left `CameraInfo`.
 - **Point cloud:** `depth_map` + `Q` → `cv2.reprojectImageTo3D` already done inside
   `DepthEngine.compute`. The 3D points are in the rectified left camera frame, Z forward, units mm.
 - **Adding a new panel/view:** subclass or reuse `ImagePanel` from `gui/widgets.py`.
