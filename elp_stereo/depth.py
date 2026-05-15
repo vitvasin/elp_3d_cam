@@ -9,6 +9,7 @@ SGBM disparity is 16-subpixel fixed-point; it is divided by 16 before any use,
 and non-positive disparities are treated as invalid.
 """
 
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
@@ -59,6 +60,14 @@ class DepthEngine:
         self.rectifier = rectifier
         self._cfg = cfg["depth"]
         self.delta_d = self._cfg["subpixel_delta_disparity"]
+        # User-adjustable depth cap (mm). Floats so GIL-atomic for cross-thread
+        # write from the GUI sliders.
+        self.min_depth_mm = float(self._cfg.get("min_depth_mm", 50.0))
+        self.max_depth_mm = float(self._cfg.get("max_depth_mm", 3000.0))
+        # Temporal averaging over N frames (1 = disabled). Noise drops as
+        # 1/sqrt(N) for static scenes. Higher = cleaner depth, more latency.
+        self.temporal_frames = int(self._cfg.get("temporal_frames", 1))
+        self._depth_buffer = deque(maxlen=max(1, self.temporal_frames))
         self._build_matchers()
         # Last computed frame state (set by compute()).
         self.disparity = None      # float32, true disparity in px, NaN = invalid
@@ -75,6 +84,8 @@ class DepthEngine:
         p2 = s["p2"] if s["p2"] is not None else 32 * ch * bs * bs
         self.min_disparity = s["min_disparity"]
         self.num_disparities = s["num_disparities"]
+        # HH mode = full 8-direction aggregation. Higher quality than 3WAY,
+        # ~2× slower but worth it for fine-detail close-range work.
         self._left_matcher = cv2.StereoSGBM_create(
             minDisparity=s["min_disparity"],
             numDisparities=s["num_disparities"],
@@ -84,7 +95,7 @@ class DepthEngine:
             uniquenessRatio=s["uniqueness_ratio"],
             speckleWindowSize=s["speckle_window_size"],
             speckleRange=s["speckle_range"],
-            mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+            mode=cv2.STEREO_SGBM_MODE_HH,
         )
         self.use_wls = self._cfg["use_wls_filter"] and WLS_AVAILABLE
         if self.use_wls:
@@ -97,10 +108,18 @@ class DepthEngine:
             self._wls = None
 
     def update_params(self, params):
-        """Apply changed SGBM/WLS params (from the GUI sliders) and rebuild."""
+        """Apply changed SGBM/WLS/depth-cap params (from the GUI) and rebuild."""
         self._cfg["sgbm"].update(params.get("sgbm", {}))
         if "use_wls_filter" in params:
             self._cfg["use_wls_filter"] = params["use_wls_filter"]
+        if "min_depth_mm" in params:
+            self.min_depth_mm = float(params["min_depth_mm"])
+        if "max_depth_mm" in params:
+            self.max_depth_mm = float(params["max_depth_mm"])
+        if "temporal_frames" in params:
+            n = max(1, int(params["temporal_frames"]))
+            self.temporal_frames = n
+            self._depth_buffer = deque(maxlen=n)
         self._build_matchers()
 
     def compute(self, left_rect, right_rect):
@@ -128,18 +147,47 @@ class DepthEngine:
         depth[invalid] = np.nan
         # Guard against the divide-by-tiny-disparity blow-ups Q can produce.
         depth[~np.isfinite(depth)] = np.nan
+        # Apply user-adjustable depth cap — anything outside [min, max] is
+        # treated as invalid for both visualization and pixel readout.
+        out_of_range = (depth < self.min_depth_mm) | (depth > self.max_depth_mm)
+        depth[out_of_range] = np.nan
+
+        # 3×3 median smoothing to kill isolated speckle pixels. NaN-aware:
+        # fill NaN with 0 for the filter, then restore original NaN mask so
+        # invalid regions don't bleed into valid ones (valid pixels near a
+        # NaN edge get a small bias toward 0, acceptable for speckle removal).
+        finite_mask = np.isfinite(depth)
+        if finite_mask.any():
+            filled = np.where(finite_mask, depth, 0.0).astype(np.float32)
+            depth = cv2.medianBlur(filled, 3)
+            depth[~finite_mask] = np.nan
+
+        # Temporal averaging — noise/sqrt(N) reduction for slow/static scenes.
+        if self.temporal_frames > 1:
+            self._depth_buffer.append(depth)
+            if len(self._depth_buffer) >= 2:
+                stack = np.stack(self._depth_buffer, axis=0)
+                with np.errstate(invalid="ignore"):
+                    depth = np.nanmean(stack, axis=0).astype(np.float32)
+
         self.depth_map = depth
         return depth
 
     def detection_range(self):
-        """Global ``(min_mm, max_mm)`` detectable depth for current SGBM params."""
+        """Active depth window ``(min_mm, max_mm)``.
+
+        Intersects the SGBM theoretical range (from disparity settings) with
+        the user-set cap. The user cap usually narrows the SGBM range to a
+        useful subset for the scene.
+        """
         f = self.rectifier.fx
         b = self.rectifier.baseline
-        d_far = self.min_disparity + self.num_disparities  # largest disparity
-        d_near = max(self.min_disparity, self.delta_d)     # smallest reliable
-        range_min = f * b / d_far
-        range_max = f * b / d_near
-        return range_min, range_max
+        d_far = self.min_disparity + self.num_disparities
+        d_near = max(self.min_disparity, self.delta_d)
+        sgbm_min = f * b / d_far
+        sgbm_max = f * b / d_near
+        return (max(sgbm_min, self.min_depth_mm),
+                min(sgbm_max, self.max_depth_mm))
 
     def pixel_info_from_map(self, depth_map, x, y):
         """Depth + uncertainty at ``(x, y)`` using an externally supplied depth map.
@@ -167,14 +215,23 @@ class DepthEngine:
         return self.pixel_info_from_map(self.depth_map, x, y)
 
     def colorized(self):
-        """BGR colormap of the last depth map for display."""
+        """BGR colormap of the last depth map for display.
+
+        Gradient spans the user-adjustable [min_depth_mm, max_depth_mm] range
+        so the same color = same physical depth across frames. Pixels outside
+        the range were already NaN-masked in compute() and render as black.
+        """
         if self.depth_map is None:
             return None
-        rmin, rmax = self.detection_range()
         depth = self.depth_map
-        norm = np.clip((depth - rmin) / max(rmax - rmin, 1e-6), 0, 1)
+        valid = np.isfinite(depth) & (depth > 0)
+        if not valid.any():
+            return np.zeros((*depth.shape, 3), np.uint8)
+        lo = self.min_depth_mm
+        hi = self.max_depth_mm
+        norm = np.clip((depth - lo) / max(hi - lo, 1e-6), 0, 1)
         norm = np.nan_to_num(norm, nan=0.0)
         vis = (norm * 255).astype(np.uint8)
         color = cv2.applyColorMap(vis, self.colormap)
-        color[~np.isfinite(depth)] = (0, 0, 0)  # invalid -> black
+        color[~valid] = (0, 0, 0)  # invalid -> black
         return color

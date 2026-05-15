@@ -46,3 +46,10 @@ depth:
   wls_sigma: 1.5
   # Subpixel disparity resolution (px) used for depth uncertainty: SGBM = 1/16 px.
   subpixel_delta_disparity: 0.0625
+  # Depth cap (mm). Pixels outside this range are masked invalid; visualization
+  # gradient maps min→max across the colormap. Adjustable from the GUI.
+  min_depth_mm: 50
+  max_depth_mm: 3000
+  # Temporal averaging over N frames. 1 = off. Higher = cleaner depth for slow
+  # or static scenes (noise drops as 1/sqrt(N)). Adds N-frame latency.
+  temporal_frames: 1

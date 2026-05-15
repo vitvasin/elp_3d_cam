@@ -49,12 +49,14 @@ class DepthWorker(QThread):
                 continue
 
             left, right = frame
-            lr, rr = self._rectifier.rectify(left, right)
-            self._engine.compute(lr, rr)
-            color = self._engine.colorized()
+            try:
+                lr, rr = self._rectifier.rectify(left, right)
+                self._engine.compute(lr, rr)
+                color = self._engine.colorized()
+            except Exception as exc:  # noqa: BLE001
+                self.result_ready.emit({"error": str(exc)})
+                continue
 
-            # Copy depth_map so the GUI holds a stable snapshot even if the
-            # next compute starts immediately after this signal is queued.
             dm = self._engine.depth_map
             dm_copy = dm.copy() if dm is not None else None
 

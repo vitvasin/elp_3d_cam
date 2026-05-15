@@ -27,6 +27,7 @@ _VIEW_MODES = [
     ("Right", False, True,  False),
     ("Both",  True,  True,  False),
     ("Depth", False, False, True),
+    ("Raw",   True,  True,  True),   # unrectified feed; bypasses depth worker for L/R
 ]
 
 from ..calibration import load_yaml
@@ -213,9 +214,14 @@ class MainWindow(QMainWindow):
 
     def on_depth_result(self, result):
         """Called in GUI thread when a depth frame is ready."""
+        if "error" in result:
+            self.status.setText(f"Depth worker error: {result['error']}")
+            return
         self._latest_depth_map = result["depth_map"]
-        self.left_panel.show_image(result["left"])
-        self.right_panel.show_image(result["right"])
+        if not self._is_raw_mode():
+            self.left_panel.show_image(result["left"])
+            self.right_panel.show_image(result["right"])
+        # Depth panel always updated from worker regardless of mode.
 
         color = result["color"]
         if color is not None:
@@ -229,14 +235,21 @@ class MainWindow(QMainWindow):
             self._update_pixel_readout(*self._depth_click)
 
     # ------------------------------------------------------------ raw display
+    def _is_raw_mode(self):
+        return self.view_combo.currentText() == "Raw"
+
     def process_tick(self):
-        """Show raw (unrectified) frames when no calibration is loaded."""
-        if self.rectifier is not None or self.latest_raw is None:
+        """Show raw (unrectified) frames when no calibration or Raw mode selected."""
+        if self.latest_raw is None:
             return
+        raw_mode = self._is_raw_mode()
+        if self.rectifier is not None and not raw_mode:
+            return  # depth worker drives L/R panels
         left, right = self.latest_raw
         self.left_panel.show_image(left)
         self.right_panel.show_image(right)
-        self.depth_panel.setText("Load calibration\nto enable depth")
+        if self.rectifier is None:
+            self.depth_panel.setText("Load calibration\nto enable depth")
 
     # --------------------------------------------------------- calibration
     def _try_autoload_calibration(self):

@@ -7,8 +7,8 @@ constraints -- numDisparities must be a multiple of 16 and blockSize must be odd
 
 import cv2
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QLabel, QPushButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..depth import WLS_AVAILABLE
@@ -63,17 +63,43 @@ class DepthWidget(QWidget):
         cmap_form.addRow("Colormap", self.cmap_combo)
         layout.addWidget(cmap_box)
 
+        # --- Depth range cap ---------------------------------------------
+        range_box = QGroupBox("Depth range (mm)")
+        range_form = QFormLayout(range_box)
+        cap_cfg = self.cfg["depth"]
+        self.sp_min_depth = QDoubleSpinBox()
+        self.sp_min_depth.setRange(1.0, 100000.0)
+        self.sp_min_depth.setDecimals(0)
+        self.sp_min_depth.setSingleStep(10.0)
+        self.sp_min_depth.setSuffix(" mm")
+        self.sp_min_depth.setValue(float(cap_cfg.get("min_depth_mm", 50.0)))
+        self.sp_max_depth = QDoubleSpinBox()
+        self.sp_max_depth.setRange(10.0, 100000.0)
+        self.sp_max_depth.setDecimals(0)
+        self.sp_max_depth.setSingleStep(100.0)
+        self.sp_max_depth.setSuffix(" mm")
+        self.sp_max_depth.setValue(float(cap_cfg.get("max_depth_mm", 3000.0)))
+        # Live-apply on change (no Apply button needed for these — fast path).
+        self.sp_min_depth.valueChanged.connect(self._on_depth_range_changed)
+        self.sp_max_depth.valueChanged.connect(self._on_depth_range_changed)
+        range_form.addRow("min", self.sp_min_depth)
+        range_form.addRow("max", self.sp_max_depth)
+        layout.addWidget(range_box)
+
         s = self.cfg["depth"]["sgbm"]
         params = QGroupBox("StereoSGBM parameters")
         form = QFormLayout(params)
 
-        self.sp_min_disp = self._spin(0, 256, 1, s["min_disparity"])
+        self.sp_min_disp = self._spin(0, 512, 1, s["min_disparity"])
         self.sp_num_disp = self._spin(16, 512, 16, s["num_disparities"])
         self.sp_block = self._spin(1, 21, 2, s["block_size"])
         self.sp_uniq = self._spin(0, 50, 1, s["uniqueness_ratio"])
         self.sp_speckle_win = self._spin(0, 300, 10, s["speckle_window_size"])
         self.sp_speckle_range = self._spin(0, 10, 1, s["speckle_range"])
         self.sp_disp12 = self._spin(-1, 50, 1, s["disp12_max_diff"])
+        self.sp_temporal = self._spin(
+            1, 32, 1, int(self.cfg["depth"].get("temporal_frames", 1))
+        )
 
         form.addRow("min disparity", self.sp_min_disp)
         form.addRow("num disparities", self.sp_num_disp)
@@ -82,6 +108,7 @@ class DepthWidget(QWidget):
         form.addRow("speckle window", self.sp_speckle_win)
         form.addRow("speckle range", self.sp_speckle_range)
         form.addRow("disp12 max diff", self.sp_disp12)
+        form.addRow("temporal frames", self.sp_temporal)
 
         self.chk_wls = QCheckBox("WLS post-filter (ximgproc)")
         if WLS_AVAILABLE:
@@ -128,6 +155,7 @@ class DepthWidget(QWidget):
         # must not reset user-tuned params or colormap choice).
         self.apply_params()
         self._on_colormap_changed()
+        self._on_depth_range_changed()
 
     def apply_params(self):
         if self.depth_engine is None:
@@ -150,6 +178,7 @@ class DepthWidget(QWidget):
                 "p2": None,
             },
             "use_wls_filter": self.chk_wls.isChecked(),
+            "temporal_frames": self.sp_temporal.value(),
         }
         self.depth_engine.update_params(params)
         rmin, rmax = self.depth_engine.detection_range()
@@ -162,6 +191,20 @@ class DepthWidget(QWidget):
             return
         idx = self.cmap_combo.currentIndex()
         self.depth_engine.colormap = _COLORMAPS[idx][1]
+
+    def _on_depth_range_changed(self, _value=None):
+        """Live-push depth cap to the engine; no SGBM rebuild needed."""
+        if self.depth_engine is None:
+            return
+        lo = self.sp_min_depth.value()
+        hi = self.sp_max_depth.value()
+        if hi <= lo:
+            return  # ignore inverted range; user is mid-edit
+        # GIL-atomic float assigns — safe without locking.
+        self.depth_engine.min_depth_mm = lo
+        self.depth_engine.max_depth_mm = hi
+        rmin, rmax = self.depth_engine.detection_range()
+        self.lbl_range.setText(f"detection range: {rmin:.0f} - {rmax:.0f} mm")
 
     def show_pixel_info(self, info):
         rmin = info.range_min_mm
