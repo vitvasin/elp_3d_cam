@@ -33,7 +33,7 @@ _VIEW_MODES = [
 from ..calibration import load_yaml
 from ..camera import CaptureThread, StereoCamera
 from ..config import project_root
-from ..depth import DepthEngine, Rectifier
+from ..depth import Rectifier, build_depth_engine
 from ..worker import DepthWorker
 from .calib_widget import CalibWidget
 from .depth_widget import DepthWidget
@@ -276,7 +276,15 @@ class MainWindow(QMainWindow):
     def apply_calibration(self, calib):
         """Install calibration: rebuild rectifier + depth engine + worker."""
         self.rectifier = Rectifier(calib)
-        self.depth_engine = DepthEngine(self.cfg, self.rectifier)
+        try:
+            self.depth_engine = build_depth_engine(self.cfg, self.rectifier)
+        except Exception as exc:  # noqa: BLE001
+            engine_name = self.cfg.get("depth", {}).get("engine", "sgbm")
+            self.status.setText(
+                f"Depth engine '{engine_name}' failed ({exc}); falling back to SGBM"
+            )
+            self.cfg.setdefault("depth", {})["engine"] = "sgbm"
+            self.depth_engine = build_depth_engine(self.cfg, self.rectifier)
         self.depth_widget.set_depth_engine(self.depth_engine)
         # Restart worker only if camera is running.
         if self.capture_thread is not None:
