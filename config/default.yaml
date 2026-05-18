@@ -29,6 +29,16 @@ calibration:
     # aruco predefined dictionary name (cv2.aruco.DICT_*).
     dictionary: "DICT_4X4_50"
 
+  circle_grid:
+    # cols = circles per row, rows = number of rows.
+    # Standard asymmetric board is 4 x 11.
+    cols: 4
+    rows: 11
+    # Spacing between adjacent circles in mm (see cv2.findCirclesGrid docs).
+    spacing_mm: 20.0
+    # true = asymmetric (recommended for stereo), false = symmetric.
+    asymmetric: true
+
 depth:
   sgbm:
     min_disparity: 0

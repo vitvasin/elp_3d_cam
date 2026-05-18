@@ -1,4 +1,4 @@
-"""Calibration target abstraction: chessboard and ChArUco boards.
+"""Calibration target abstraction: chessboard, ChArUco, and circle-grid boards.
 
 Each target detects corners in a grayscale image and returns a ``Detection``
 holding matched 3D object points and 2D image points. ``ids`` is ``None`` for a
@@ -143,10 +143,60 @@ class CharucoTarget(CalibrationTarget):
         )
 
 
+class CircleGridTarget(CalibrationTarget):
+    """Symmetric or asymmetric circle grid (``cv2.findCirclesGrid``).
+
+    For asymmetric grids, ``cols`` is the number of circles per row and
+    ``rows`` is the number of rows; ``spacing_mm`` is the distance between
+    a circle and its neighbour in the same row of an adjacent row (OpenCV
+    convention — see ``cv2.findCirclesGrid`` docs).
+    """
+
+    def __init__(self, cols, rows, spacing_mm, asymmetric=True):
+        self.cols = int(cols)
+        self.rows = int(rows)
+        self.spacing_mm = float(spacing_mm)
+        self.asymmetric = bool(asymmetric)
+        self._flag = (cv2.CALIB_CB_ASYMMETRIC_GRID if self.asymmetric
+                      else cv2.CALIB_CB_SYMMETRIC_GRID)
+        self._objp = self._build_object_points()
+
+    def _build_object_points(self):
+        objp = np.zeros((self.rows * self.cols, 3), np.float32)
+        s = self.spacing_mm
+        if self.asymmetric:
+            for i in range(self.rows):
+                for j in range(self.cols):
+                    objp[i * self.cols + j] = ((2 * j + i % 2) * s, i * s, 0.0)
+        else:
+            for i in range(self.rows):
+                for j in range(self.cols):
+                    objp[i * self.cols + j] = (j * s, i * s, 0.0)
+        return objp
+
+    def detect(self, gray):
+        found, centers = cv2.findCirclesGrid(
+            gray, (self.cols, self.rows), flags=self._flag
+        )
+        if not found or centers is None:
+            return None
+        return Detection(
+            object_points=self._objp.copy(),
+            image_points=centers.reshape(-1, 2).astype(np.float32),
+            ids=None,
+        )
+
+    def draw(self, bgr, detection):
+        cv2.drawChessboardCorners(
+            bgr, (self.cols, self.rows),
+            detection.image_points.reshape(-1, 1, 2), True,
+        )
+
+
 def build_target(kind, cfg):
     """Construct a target from the ``calibration`` config block.
 
-    ``kind`` is ``"chessboard"`` or ``"charuco"``.
+    ``kind`` is ``"chessboard"``, ``"charuco"``, or ``"circle_grid"``.
     """
     if kind == "chessboard":
         c = cfg["chessboard"]
@@ -156,5 +206,11 @@ def build_target(kind, cfg):
         return CharucoTarget(
             c["squares_x"], c["squares_y"], c["square_len_mm"],
             c["marker_len_mm"], c["dictionary"],
+        )
+    if kind == "circle_grid":
+        c = cfg["circle_grid"]
+        return CircleGridTarget(
+            c["cols"], c["rows"], c["spacing_mm"],
+            asymmetric=c.get("asymmetric", True),
         )
     raise ValueError(f"Unknown target kind: {kind}")

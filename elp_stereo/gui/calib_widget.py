@@ -6,7 +6,7 @@ import os
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -31,7 +31,7 @@ class CalibWidget(QWidget):
 
         # --- Board type + parameters --------------------------------------
         self.board_combo = QComboBox()
-        self.board_combo.addItems(["chessboard", "charuco"])
+        self.board_combo.addItems(["chessboard", "charuco", "circle_grid"])
         self.board_combo.currentTextChanged.connect(self._swap_params)
 
         cb = self.cfg["calibration"]["chessboard"]
@@ -62,10 +62,24 @@ class CalibWidget(QWidget):
         f.addRow("marker mm", self.ch_marker)
         f.addRow("dictionary", self.ch_dict)
 
+        cg = self.cfg["calibration"]["circle_grid"]
+        self.cg_cols = self._spin(2, 30, cg["cols"])
+        self.cg_rows = self._spin(2, 30, cg["rows"])
+        self.cg_spacing = self._dspin(0.1, 500.0, cg["spacing_mm"])
+        self.cg_asymmetric = QCheckBox("asymmetric")
+        self.cg_asymmetric.setChecked(bool(cg.get("asymmetric", True)))
+        self.cg_box = QGroupBox("Circle grid")
+        f = QFormLayout(self.cg_box)
+        f.addRow("cols (per row)", self.cg_cols)
+        f.addRow("rows", self.cg_rows)
+        f.addRow("spacing mm", self.cg_spacing)
+        f.addRow("pattern", self.cg_asymmetric)
+
         layout.addWidget(QLabel("Board type"))
         layout.addWidget(self.board_combo)
         layout.addWidget(self.cb_box)
         layout.addWidget(self.ch_box)
+        layout.addWidget(self.cg_box)
         self._swap_params(self.board_combo.currentText())
 
         # --- Live capture -------------------------------------------------
@@ -125,6 +139,7 @@ class CalibWidget(QWidget):
     def _swap_params(self, kind):
         self.cb_box.setVisible(kind == "chessboard")
         self.ch_box.setVisible(kind == "charuco")
+        self.cg_box.setVisible(kind == "circle_grid")
 
     # -------------------------------------------------------------- target
     def _current_target(self):
@@ -141,6 +156,12 @@ class CalibWidget(QWidget):
                 "square_len_mm": self.ch_square.value(),
                 "marker_len_mm": self.ch_marker.value(),
                 "dictionary": self.ch_dict.currentText(),
+            },
+            "circle_grid": {
+                "cols": self.cg_cols.value(),
+                "rows": self.cg_rows.value(),
+                "spacing_mm": self.cg_spacing.value(),
+                "asymmetric": self.cg_asymmetric.isChecked(),
             },
         }
         return build_target(kind, cfg)
