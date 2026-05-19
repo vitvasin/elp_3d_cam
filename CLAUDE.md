@@ -9,8 +9,8 @@ that streams a hardware-synchronized side-by-side (SBS) wide frame
 (e.g. 2560×720 = left 1280×720 | right 1280×720). The app provides:
 
 1. **Live visualization** — synchronized left / right / depth panels.
-2. **Stereo calibration** — chessboard or ChArUco board, live capture or folder load.
-3. **Depth measurement** — per-pixel depth (mm) with uncertainty band and detectable range.
+2. **Stereo calibration** — chessboard, ChArUco, or circle-grid (symmetric / asymmetric) board, live capture or folder load.
+3. **Depth measurement** — per-pixel depth (mm) with uncertainty band and detectable range. CPU SGBM or NVIDIA VPI (Jetson) backend.
 
 ## Hardware
 
@@ -37,11 +37,12 @@ config/stereo_calib.yaml        Calibration output. Auto-loaded on startup. In .
 elp_stereo/
   config.py                     load_config(path=None) → dict. project_root() → Path.
   camera.py                     StereoCamera, CaptureThread (QThread).
-  targets.py                    ChessboardTarget, CharucoTarget, build_target(kind, cfg).
+  targets.py                    ChessboardTarget, CharucoTarget, CircleGridTarget, build_target(kind, cfg).
   calibration.py                StereoCalibrator, CalibrationResult, save_yaml, load_yaml.
-  depth.py                      Rectifier, DepthEngine, PixelInfo.
+  depth.py                      Rectifier, DepthEngine (SGBM), build_depth_engine, PixelInfo.
+  depth_vpi.py                  VPIDepthEngine (NVIDIA VPI on Jetson, OFA/CUDA backends).
   pipeline.py                   StereoPipeline (Headless API).
-  worker.py                     DepthWorker (QThread) — background SGBM compute.
+  worker.py                     DepthWorker (QThread) — background depth compute (engine-agnostic).
   gui/
     widgets.py                  ImagePanel (QLabel + click→image coords signal).
     main_window.py              MainWindow — top-level, wires all components.
@@ -61,7 +62,7 @@ CaptureThread  ──frames_ready(left, right)──►  MainWindow.on_frames_re
                                                DepthWorker.submit(left, right)
                                                     │  (drops frame if busy)
                                                     ▼
-                                               rectify → SGBM → reprojectImageTo3D
+                                               rectify → engine.compute (SGBM or VPI) → reprojectImageTo3D
                                                     │
                                          result_ready({left, right, color, depth_map})
                                                     │
@@ -100,14 +101,17 @@ pipe.stop()
 
 ### `CalibrationTarget` (`targets.py`)
 ```python
-target = build_target("chessboard", cfg["calibration"])
-target = build_target("charuco",    cfg["calibration"])
+target = build_target("chessboard",  cfg["calibration"])
+target = build_target("charuco",     cfg["calibration"])
+target = build_target("circle_grid", cfg["calibration"])  # sym + asym
 det = target.detect(gray_image)   # Detection | None
 det.object_points   # (N,3) float32 mm
 det.image_points    # (N,2) float32 px
-det.ids             # (N,1) int32 charuco ids, or None (chessboard)
+det.ids             # (N,1) int32 charuco ids, or None (chessboard / circle_grid)
 target.draw(bgr, det)
 ```
+
+`CircleGridTarget` uses `cv2.findCirclesGrid`. For asymmetric: `cols` = circles per row, `rows` = total rows; `spacing_mm` = `s` where same-row horizontal pitch = `2*s` and vertical row pitch = `s` (OpenCV convention). Standard board: 4×11 asymmetric.
 
 ### `StereoCalibrator` (`calibration.py`)
 ```python
@@ -131,7 +135,7 @@ rect.baseline   # baseline mm (from P2)
 rect.Q          # 4×4 reprojection matrix
 ```
 
-### `DepthEngine` (`depth.py`)
+### `DepthEngine` (`depth.py`) — CPU SGBM
 ```python
 engine = DepthEngine(cfg, rectifier)
 depth_map = engine.compute(left_rect, right_rect)   # float32 (H,W) mm, NaN=invalid
@@ -141,16 +145,31 @@ info = engine.pixel_info_from_map(depth_map, x, y) # PixelInfo (use snapshot cop
 engine.update_params({"sgbm": {...}, "min_depth_mm": 50, "temporal_frames": 5})
 ```
 
-- **SGBM Mode:** Uses `cv2.STEREO_SGBM_MODE_HH` (full 8-direction) for quality.
+- **SGBM Mode:** Selectable via `sgbm.mode` config: `HH` (8-dir, slowest, best), `SGBM` (5-dir, default OpenCV), `SGBM_3WAY` (3-dir, ~3× faster — current default), `HH4` (4-dir, OpenCV ≥ 4.5).
 - **Range Capping:** `min_depth_mm` and `max_depth_mm` act as a depth mask.
 - **Temporal Averaging:** `temporal_frames > 1` enables `1/sqrt(N)` noise reduction.
-- **Speckle Removal:** 3x3 median blur is applied to the depth map.
+- **Speckle Removal:** 3×3 median blur applied to the depth map.
+
+The compute path is split into `compute()` (matcher-specific disparity) and `_finalize_depth(disp_px)` (shared Q-reproject + capping + median + temporal averaging). `VPIDepthEngine` reuses `_finalize_depth`.
+
+### `VPIDepthEngine` (`depth_vpi.py`) — NVIDIA VPI (Jetson)
+```python
+from elp_stereo.depth import build_depth_engine
+engine = build_depth_engine(cfg, rectifier)   # picks engine from cfg["depth"]["engine"]
+# same API as DepthEngine: compute / colorized / detection_range / pixel_info_from_map
+```
+
+- **Backend:** `vpi.backend` config = `"OFA"` (dedicated stereo HW on Orin, frees CPU + GPU; default) or `"CUDA"`. On 4 GB Orin Nano avoid CUDA at ≥ 720p — NvMap OOM.
+- **Subpixel:** VPI disparity is Q10.5 (1/32 px) — `delta_d = 1/32` (overrides config).
+- **Buffer reuse:** All VPI images are pre-allocated in `_build_matchers`; `compute()` copies new frames in via `lock_cpu` and runs conversions with `out=` targets. Without this, the NvMap allocator pool exhausts after ~10 frames at HD.
+- **Pipeline:** U8 → Y16_ER (CUDA scale ×256) → Y16_ER_BL (VIC) → `stereodisp` (OFA, S16_BL out) → S16 (VIC) → numpy → `_finalize_depth`.
+- **Factory:** `build_depth_engine(cfg, rectifier)` dispatches on `cfg["depth"]["engine"]` (`"sgbm"` | `"vpi"`). `MainWindow.apply_calibration` falls back to SGBM if VPI import fails.
 
 ### `PixelInfo` fields
 `valid: bool, depth_mm, error_mm, range_min_mm, range_max_mm`
 
 Depth uncertainty: `error_mm = z² / (fx * baseline) * delta_d`
-where `delta_d` = 1/16 px (SGBM subpixel resolution, configurable).
+where `delta_d` = 1/16 px for SGBM (Q4.4) and 1/32 px for VPI (Q10.5).
 
 ### `DepthWorker` (`worker.py`)
 ```python
@@ -185,13 +204,16 @@ camera:
 
 calibration:
   output_path: "config/stereo_calib.yaml"
-  chessboard: {cols: 9, rows: 6, square_size_mm: 25.0}
-  charuco: {squares_x: 5, squares_y: 7, square_len_mm: 30.0, marker_len_mm: 22.0, dictionary: DICT_4X4_50}
+  chessboard:  {cols: 9, rows: 6, square_size_mm: 25.0}
+  charuco:     {squares_x: 5, squares_y: 7, square_len_mm: 30.0, marker_len_mm: 22.0, dictionary: DICT_4X4_50}
+  circle_grid: {cols: 4, rows: 11, spacing_mm: 20.0, asymmetric: true}
 
 depth:
-  sgbm: {min_disparity: 0, num_disparities: 128, block_size: 5, ...}
+  engine: "vpi"                     # "sgbm" (CPU) | "vpi" (Jetson, OFA/CUDA)
+  vpi:    {backend: "OFA", quality: 6}
+  sgbm:   {min_disparity: 0, num_disparities: 128, block_size: 5, mode: "SGBM_3WAY", ...}
   use_wls_filter: false
-  subpixel_delta_disparity: 0.0625   # 1/16 px
+  subpixel_delta_disparity: 0.0625  # 1/16 px (SGBM only; VPI uses 1/32 internally)
 ```
 
 ## OpenCV version compatibility
@@ -202,6 +224,7 @@ depth:
 | ≥ 4.7  | `getPredefinedDictionary` / `CharucoBoard` / `CharucoDetector` | `_ARUCO_MODERN = True` |
 
 `WLS_AVAILABLE = hasattr(cv2, "ximgproc")` — WLS filter disabled gracefully if absent.
+`VPI_AVAILABLE` — `import vpi` guarded in `depth_vpi.py`; on non-Jetson installs the factory transparently falls back to SGBM.
 
 ## Integration notes for future sessions
 
@@ -214,8 +237,7 @@ depth:
   `DepthEngine.compute`. The 3D points are in the rectified left camera frame, Z forward, units mm.
 - **Adding a new panel/view:** subclass or reuse `ImagePanel` from `gui/widgets.py`.
   Connect to `MainWindow.depth_worker.result_ready` or add a new signal to `DepthWorker`.
-- **Custom depth algorithm:** replace `DepthEngine.compute` or subclass `DepthEngine`.
-  The rest of the pipeline (Rectifier, DepthWorker, GUI) is algorithm-agnostic.
+- **Custom depth algorithm:** subclass `DepthEngine`, override `_build_matchers` and `compute`, reuse `_finalize_depth` for Q reproject + capping + median + temporal averaging. Add a kind to `build_depth_engine` to wire it. `VPIDepthEngine` is the reference example.
 - **Saving captures:** hook into `DepthWorker.result_ready` or `CaptureThread.frames_ready`.
   Both fire in background threads — copy arrays before storing.
 
