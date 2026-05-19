@@ -1,0 +1,11 @@
+# Extra requirements for app_detect.py (on top of requirements.txt).
+#
+# Pick ONE detector backend (both can be installed):
+ultralytics>=8.0          # .pt models (PyTorch)
+onnxruntime-gpu           # .onnx models on Jetson (CUDA EP). Use onnxruntime on CPU-only hosts.
+#
+# ROS2 (Humble or Jazzy) — install via apt, not pip. Examples:
+#   sudo apt install ros-humble-rclpy ros-humble-vision-msgs ros-humble-tf2-ros
+#   sudo apt install ros-jazzy-rclpy  ros-jazzy-vision-msgs  ros-jazzy-tf2-ros
+# Source the setup before running app_detect.py:
+#   source /opt/ros/<distro>/setup.bash

@@ -1,0 +1,78 @@
+# Detection + ROS2 publisher config.
+# Camera / depth blocks come from config/default.yaml (deep-merged at runtime).
+
+calibration_path: "config/stereo_calib.yaml"
+
+detection:
+  # Path to .pt (Ultralytics) or .onnx (onnxruntime, YOLOv8 head).
+  model_path: "models/worm.pt"
+  # Lower default for tiny (4-7 px) targets.
+  confidence: 0.25
+  iou: 0.45
+  # Filter by class id (list of ints), or null = all classes.
+  classes: null
+  # Min number of valid stereo depth pixels inside the SHRUNKEN bbox before
+  # falling back to the tray plane Z (if available). 5 fits worms ~25 px area.
+  min_valid_pixels: 5
+  # Inner fraction of the bbox sampled for depth median (avoids edge bleed).
+  bbox_shrink: 0.6
+  # If true and stereo depth in bbox is too sparse, use plane_z_at(tray) at the
+  # bbox center. Requires "Fit Tray Plane" to be run at least once.
+  depth_fallback_to_plane: true
+  # ONNX-only: class names list for label rendering (Ultralytics .pt carries
+  # its own names dict).
+  onnx_class_names: null
+  # Higher than 640 to retain pixels of 4-7 px worms after letterbox.
+  onnx_input_size: 960
+
+preproc:
+  # CLAHE on LAB-L for the inference branch only (depth uses the raw frame).
+  clahe: true
+  clahe_clip: 2.0
+  clahe_grid: [8, 8]
+
+tiling:
+  # 2x2 with 20% overlap keeps tiny targets at native pixel resolution.
+  enabled: true
+  grid: [2, 2]
+  overlap: 0.2
+
+pick_strategy:
+  # "top_score" = publish a single best detection per frame; "all" = publish list.
+  mode: "top_score"
+
+tray_plane:
+  # If true, a "Fit Tray Plane" button appears in the GUI and worker uses the
+  # fitted plane as Z fallback (see detection.depth_fallback_to_plane).
+  enabled: true
+  # RANSAC params.
+  ransac_iters: 200
+  ransac_threshold_mm: 5.0
+
+smoothing:
+  # EMA on (u, v, X, Y, Z) of the top-1 detection across frames.
+  enabled: true
+  alpha: 0.4
+  # Pixel distance jump that triggers a tracker reset (treated as new target).
+  reset_px_dist: 30.0
+  # Frames with no detection before clearing the smoothed state.
+  max_miss_frames: 10
+
+ros2:
+  enabled: true
+  node_name: "elp_detector"
+  topic: "/elp/detections"
+  # Frame the detections are reported in when use_tf_lookup is false.
+  camera_frame: "camera_optical_frame"
+  # Target frame for poses when use_tf_lookup is true.
+  robot_frame: "robot_base"
+  # false -> publish in camera_frame and let downstream TF do the math.
+  # true  -> pre-transform XYZ into robot_frame using tf2 lookup.
+  use_tf_lookup: false
+  # Static TF published once at startup so downstream can resolve camera->robot
+  # without an extra publisher. Set translation/rotation from hand-eye calib.
+  static_tf:
+    parent: "robot_base"
+    child: "camera_optical_frame"
+    translation_m: [0.0, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]

@@ -4,13 +4,23 @@ Context file for AI sessions integrating with or extending this codebase.
 
 ## What this is
 
-Desktop app (PyQt5) for the **ELP 3D USB stereo camera** — a single-USB device
-that streams a hardware-synchronized side-by-side (SBS) wide frame
-(e.g. 2560×720 = left 1280×720 | right 1280×720). The app provides:
+Two PyQt5 desktop apps for the **ELP 3D USB stereo camera** — a single-USB
+device that streams a hardware-synchronized side-by-side (SBS) wide frame
+(e.g. 2560×720 = left 1280×720 | right 1280×720).
 
-1. **Live visualization** — synchronized left / right / depth panels.
-2. **Stereo calibration** — chessboard, ChArUco, or circle-grid (symmetric / asymmetric) board, live capture or folder load.
-3. **Depth measurement** — per-pixel depth (mm) with uncertainty band and detectable range. CPU SGBM or NVIDIA VPI (Jetson) backend.
+**App 1 — `app.py` (calibration + live depth viewer)**
+1. Synchronized left / right / depth panels.
+2. Stereo calibration — chessboard, ChArUco, or circle-grid (symmetric / asymmetric).
+3. Per-pixel depth (mm) with uncertainty band. CPU SGBM or NVIDIA VPI (Jetson).
+
+**App 2 — `app_detect.py` (object detection + ROS2 publisher)**
+1. Loads calibration from App 1, runs depth pipeline.
+2. Object detection on rectified-left frame — `.pt` (Ultralytics) or `.onnx`
+   (onnxruntime, YOLOv8 head), auto-picked by extension.
+3. Tiled inference (2×2 + 20% overlap), CLAHE pre-proc, tray-plane Z fallback,
+   shrink-bbox depth pick, centroid-EMA smoothing of top-1.
+4. Publishes top-1 (or all) detections to `vision_msgs/Detection3DArray` on
+   `/elp/detections` + static TF `robot_base → camera_optical_frame`.
 
 ## Hardware
 
@@ -30,9 +40,11 @@ that streams a hardware-synchronized side-by-side (SBS) wide frame
 ## File map
 
 ```
-app.py                          Entry point. Loads config, launches MainWindow.
-config/default.yaml             All runtime config (device, board, SGBM params).
-config/stereo_calib.yaml        Calibration output. Auto-loaded on startup. In .gitignore.
+app.py                          App 1 entry. Calibration + depth viewer.
+app_detect.py                   App 2 entry. Detection + ROS2 publisher. Deep-merges detect.yaml.
+config/default.yaml             Camera + depth + calibration board params.
+config/detect.yaml              Detection + ROS2 + optimization params (App 2 overlay).
+config/stereo_calib.yaml        Calibration output. Auto-loaded by both apps. In .gitignore.
 
 elp_stereo/
   config.py                     load_config(path=None) → dict. project_root() → Path.
@@ -42,12 +54,29 @@ elp_stereo/
   depth.py                      Rectifier, DepthEngine (SGBM), build_depth_engine, PixelInfo.
   depth_vpi.py                  VPIDepthEngine (NVIDIA VPI on Jetson, OFA/CUDA backends).
   pipeline.py                   StereoPipeline (Headless API).
-  worker.py                     DepthWorker (QThread) — background depth compute (engine-agnostic).
+  worker.py                     DepthWorker (QThread) — background depth compute.
+
+  detection/                    App 2 detection package.
+    detector.py                 Detector ABC, PtDetector, OnnxDetector, build_detector(path,...).
+    tiler.py                    make_tiles(W,H,grid,overlap), TiledDetector (wraps any Detector).
+    preproc.py                  clahe_bgr(bgr) — LAB-L CLAHE.
+    plane.py                    Plane dataclass, fit_tray_plane (RANSAC+SVD), plane_z_at.
+    depth_pick.py               bbox_median_depth, bbox_robust_depth (shrink), pixel_to_camera_xyz.
+    tracker.py                  TopPickTracker (centroid-EMA, reset on jump, miss counter).
+    worker.py                   DetectionWorker (QThread) — full pipeline.
+
+  ros2/                         App 2 ROS2 publisher (guarded; degrades if rclpy/vision_msgs missing).
+    __init__.py                 ROS2_AVAILABLE probe.
+    publisher.py                DetectionPublisher (Node) + RosSpinThread.
+    tf_utils.py                 static_transform_from_config, lookup_camera_to_robot, transform_point_mm.
+
   gui/
     widgets.py                  ImagePanel (QLabel + click→image coords signal).
-    main_window.py              MainWindow — top-level, wires all components.
+    main_window.py              App 1 MainWindow.
     calib_widget.py             Calibration tab UI.
     depth_widget.py             Depth tab UI (SGBM sliders + pixel readout).
+    detect_main_window.py       App 2 DetectMainWindow.
+    detect_widget.py            App 2 DetectionWidget (model, opt toggles, plane, ROS status).
 
 examples/
   headless_depth.py             Stand-alone integration example using StereoPipeline.
@@ -241,10 +270,92 @@ depth:
 - **Saving captures:** hook into `DepthWorker.result_ready` or `CaptureThread.frames_ready`.
   Both fire in background threads — copy arrays before storing.
 
+## App 2 — Detection + ROS2
+
+### Detector (`elp_stereo.detection.detector`)
+```python
+det = build_detector("models/worm.pt", conf=0.25, iou=0.45,
+                     classes=None, class_names=None, input_size=960)
+# Detection(cls_id, cls_name, score, bbox=(x1,y1,x2,y2))
+results = det.infer(left_rect_bgr)
+```
+Backend auto-picked: `.pt` → `PtDetector` (ultralytics), `.onnx` → `OnnxDetector`
+(onnxruntime, YOLOv8 head decode + cv2.dnn.NMSBoxes, 640/960 letterbox).
+
+### Tiled inference (`tiler.py`)
+```python
+td = TiledDetector(det, grid=(2,2), overlap=0.2, iou=0.45)
+# splits bgr -> per-tile infer -> remap bbox -> global NMS
+```
+Keeps tiny targets at native px resolution; mandatory for sub-10-px objects.
+
+### Tray-plane fallback (`plane.py`)
+```python
+plane = fit_tray_plane(depth_map, P1, iters=200, thresh_mm=5.0)
+# Plane(n, d, rms, mean_z_mm, tilt_deg)
+z = plane_z_at(plane, u, v, P1)   # mm
+```
+Used when bbox stereo depth has too few valid pixels (worms texture-poor).
+
+### Robust depth pick (`depth_pick.py`)
+```python
+z, n = bbox_robust_depth(depth_map, (x1,y1,x2,y2), shrink=0.6)
+```
+Shrinks bbox to inner 60% → median → avoids background bleed at bbox edges.
+
+### Top-1 smoothing (`tracker.py`)
+```python
+trk = TopPickTracker(alpha=0.4, reset_px_dist=30.0, max_miss_frames=10)
+smoothed = trk.update(item)   # or None
+```
+Centroid-EMA in pixel + 3D space; resets on jumps > `reset_px_dist`.
+
+### Worker (`detection/worker.py`) pipeline
+```
+left,right  → rectify → depth (raw input!) → CLAHE? → detector (tiled?) →
+top-1 by score → bbox_robust_depth → fallback to plane Z if sparse →
+pixel_to_camera_xyz → tracker → result_ready(dict)
+```
+Setters: `set_clahe`, `set_tile_params(enabled, grid, overlap)`,
+`set_plane(plane)`, `set_tracker(t)`, `set_fallback_to_plane`,
+`set_bbox_shrink`, `set_projection(P1)`.
+
+### ROS2 publisher (`elp_stereo.ros2`)
+```python
+node = DetectionPublisher(cfg["ros2"])
+n = node.publish_detections([item, ...])   # vision_msgs/Detection3DArray
+```
+- Topic default: `/elp/detections` (Reliable, depth 10).
+- Static TF: `cfg["ros2"]["static_tf"]` → `StaticTransformBroadcaster` at init.
+- `use_tf_lookup: true` → pre-transforms XYZ into `robot_frame` via tf2 lookup;
+  message `header.frame_id` flips from `camera_frame` to `robot_frame`.
+- All ROS imports guarded; `ROS2_AVAILABLE` flag exposed at package root.
+
+### App 2 config (`config/detect.yaml`) — defaults tuned for 4–7 px worms
+
+```yaml
+detection:   {confidence: 0.25, iou: 0.45, min_valid_pixels: 5,
+              bbox_shrink: 0.6, depth_fallback_to_plane: true,
+              onnx_input_size: 960}
+preproc:     {clahe: true, clahe_clip: 2.0, clahe_grid: [8,8]}
+tiling:      {enabled: true, grid: [2,2], overlap: 0.2}
+tray_plane:  {enabled: true, ransac_iters: 200, ransac_threshold_mm: 5.0}
+smoothing:   {enabled: true, alpha: 0.4, reset_px_dist: 30.0, max_miss_frames: 10}
+pick_strategy: {mode: "top_score"}        # or "all"
+ros2:        {topic, camera_frame, robot_frame, use_tf_lookup, static_tf{...}}
+```
+`app_detect.py` loads `config/default.yaml` (camera + depth) and deep-merges
+this overlay on top, so per-eye/SGBM/VPI params stay single-sourced.
+
 ## Run
 
 ```bash
-python app.py
+python app.py            # App 1 (calibration + depth viewer)
+
+# App 2 — ROS2 env must be sourced (humble or jazzy):
+#   sudo apt install ros-<distro>-vision-msgs ros-<distro>-tf2-ros
+#   source /opt/ros/<distro>/setup.bash
+python app_detect.py
 ```
 
 ## Smoke test (no display needed)

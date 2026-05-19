@@ -16,4 +16,9 @@ config/stereo_calib.yaml
 images/
 data/
 
+# Detection model weights (downloaded / trained externally)
+models/
+*.pt
+*.onnx
+
 *.log
