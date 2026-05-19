@@ -19,6 +19,19 @@ import numpy as np
 # post-filter is disabled gracefully when it is missing.
 WLS_AVAILABLE = hasattr(cv2, "ximgproc")
 
+# SGBM aggregation modes — name -> cv2 constant.
+# HH:        8-direction, slowest, highest quality.
+# SGBM:      5-direction, OpenCV default, balanced.
+# SGBM_3WAY: 3-direction, fastest, slight quality drop.
+# HH4:       4-direction (OpenCV >= 4.5), middle ground.
+_SGBM_MODES = {
+    "HH":        cv2.STEREO_SGBM_MODE_HH,
+    "SGBM":      cv2.STEREO_SGBM_MODE_SGBM,
+    "SGBM_3WAY": cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+}
+if hasattr(cv2, "STEREO_SGBM_MODE_HH4"):
+    _SGBM_MODES["HH4"] = cv2.STEREO_SGBM_MODE_HH4
+
 
 class Rectifier:
     """Builds and applies the stereo rectification remap from a calibration."""
@@ -84,8 +97,11 @@ class DepthEngine:
         p2 = s["p2"] if s["p2"] is not None else 32 * ch * bs * bs
         self.min_disparity = s["min_disparity"]
         self.num_disparities = s["num_disparities"]
-        # HH mode = full 8-direction aggregation. Higher quality than 3WAY,
-        # ~2× slower but worth it for fine-detail close-range work.
+        mode_name = s.get("mode", "HH")
+        if mode_name not in _SGBM_MODES:
+            raise ValueError(
+                f"Unknown sgbm.mode '{mode_name}'. Valid: {sorted(_SGBM_MODES)}"
+            )
         self._left_matcher = cv2.StereoSGBM_create(
             minDisparity=s["min_disparity"],
             numDisparities=s["num_disparities"],
@@ -95,7 +111,7 @@ class DepthEngine:
             uniquenessRatio=s["uniqueness_ratio"],
             speckleWindowSize=s["speckle_window_size"],
             speckleRange=s["speckle_range"],
-            mode=cv2.STEREO_SGBM_MODE_HH,
+            mode=_SGBM_MODES[mode_name],
         )
         self.use_wls = self._cfg["use_wls_filter"] and WLS_AVAILABLE
         if self.use_wls:
@@ -135,34 +151,34 @@ class DepthEngine:
             raw = raw_left
 
         disp = raw.astype(np.float32) / 16.0
+        return self._finalize_depth(disp)
+
+    def _finalize_depth(self, disp):
+        """Convert a float32 disparity map (px, <=0 = invalid) into depth (mm).
+
+        Shared by SGBM and VPI backends. Applies Q reprojection, depth-range
+        capping, speckle median, and temporal averaging.
+        """
         invalid = disp <= 0
+        disp = disp.copy()
         disp[invalid] = np.nan
         self.disparity = disp
 
-        # Depth via Q. Feed the true (un-scaled) disparity as float32.
         points3d = cv2.reprojectImageTo3D(
             np.nan_to_num(disp, nan=0.0).astype(np.float32), self.rectifier.Q
         )
         depth = points3d[:, :, 2].astype(np.float32)
         depth[invalid] = np.nan
-        # Guard against the divide-by-tiny-disparity blow-ups Q can produce.
         depth[~np.isfinite(depth)] = np.nan
-        # Apply user-adjustable depth cap — anything outside [min, max] is
-        # treated as invalid for both visualization and pixel readout.
         out_of_range = (depth < self.min_depth_mm) | (depth > self.max_depth_mm)
         depth[out_of_range] = np.nan
 
-        # 3×3 median smoothing to kill isolated speckle pixels. NaN-aware:
-        # fill NaN with 0 for the filter, then restore original NaN mask so
-        # invalid regions don't bleed into valid ones (valid pixels near a
-        # NaN edge get a small bias toward 0, acceptable for speckle removal).
         finite_mask = np.isfinite(depth)
         if finite_mask.any():
             filled = np.where(finite_mask, depth, 0.0).astype(np.float32)
             depth = cv2.medianBlur(filled, 3)
             depth[~finite_mask] = np.nan
 
-        # Temporal averaging — noise/sqrt(N) reduction for slow/static scenes.
         if self.temporal_frames > 1:
             self._depth_buffer.append(depth)
             if len(self._depth_buffer) >= 2:
@@ -235,3 +251,18 @@ class DepthEngine:
         color = cv2.applyColorMap(vis, self.colormap)
         color[~valid] = (0, 0, 0)  # invalid -> black
         return color
+
+
+def build_depth_engine(cfg, rectifier):
+    """Construct a depth engine based on ``cfg['depth']['engine']``.
+
+    ``"sgbm"`` (default) = CPU OpenCV StereoSGBM.
+    ``"vpi"``            = NVIDIA VPI (GPU/OFA on Jetson). Imported lazily.
+    """
+    name = cfg.get("depth", {}).get("engine", "sgbm").lower()
+    if name == "sgbm":
+        return DepthEngine(cfg, rectifier)
+    if name == "vpi":
+        from .depth_vpi import VPIDepthEngine
+        return VPIDepthEngine(cfg, rectifier)
+    raise ValueError(f"Unknown depth engine '{name}'. Valid: sgbm, vpi")

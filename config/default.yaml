@@ -40,6 +40,19 @@ calibration:
     asymmetric: true
 
 depth:
+  # Compute backend.
+  #   sgbm - CPU OpenCV StereoSGBM (works everywhere, single-threaded)
+  #   vpi  - NVIDIA VPI on Jetson (OFA hardware = near-zero CPU/GPU usage)
+  engine: "vpi"
+
+  # VPI-specific settings (used when engine: "vpi").
+  vpi:
+    # Backend: "OFA" (dedicated stereo HW, fastest, best for Orin) or "CUDA".
+    # Avoid CUDA on 4 GB Orin Nano at >= 720p (OOM under memory pressure).
+    backend: "OFA"
+    # PVA+NVENC+VIC quality knob, 1..8. Ignored by OFA/CUDA but harmless.
+    quality: 6
+
   sgbm:
     min_disparity: 0
     num_disparities: 128   # must be divisible by 16
@@ -51,6 +64,12 @@ depth:
     # P1/P2 smoothness: computed as multiplier * block_size^2 * channels if null.
     p1: null
     p2: null
+    # SGBM aggregation mode. Trades CPU for quality.
+    #   HH        - 8-direction, slowest, highest quality (~2x slower than SGBM)
+    #   SGBM      - 5-direction, OpenCV default
+    #   SGBM_3WAY - 3-direction, fastest (~3x faster than HH), slight quality drop
+    #   HH4       - 4-direction (OpenCV >= 4.5)
+    mode: "SGBM_3WAY"
   use_wls_filter: false
   wls_lambda: 8000.0
   wls_sigma: 1.5
