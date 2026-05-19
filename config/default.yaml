@@ -43,7 +43,7 @@ depth:
   # Compute backend.
   #   sgbm - CPU OpenCV StereoSGBM (works everywhere, single-threaded)
   #   vpi  - NVIDIA VPI on Jetson (OFA hardware = near-zero CPU/GPU usage)
-  engine: "sgbm"
+  engine: "vpi"
 
   # VPI-specific settings (used when engine: "vpi").
   vpi:
