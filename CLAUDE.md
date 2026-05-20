@@ -43,7 +43,7 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
 3. Executes a simple approach/pick/lift/place/release sequence through MG400
    `MovJ`/`MovL` actions and DO services.
 4. Includes tabs for detection picking, manual Cartesian control/jog/DO,
-   clear-error/enable/disable, and an auto loop with editable place points.
+   clear-error/enable/disable, camera-click pick testing, and an auto loop with editable place points.
 5. Saves home pose and robot-control preferences to `config/robot_control.yaml`.
 
 ## Hardware
@@ -300,6 +300,11 @@ Calibration safety:
   before building a rectifier.
 - If left/right order changes, recalibrate; image size validation cannot detect
   a wrong-order calibration by itself.
+- App 4 Camera Pick tab uses `load_config()` plus the calibration output path,
+  starts its own `CaptureThread` + `DepthWorker`, back-projects clicked
+  rectified-left pixels with `P1`, transforms camera meters through
+  `config/hand_eye.yaml`, then applies a configurable robot Z offset before
+  MoveJ or the existing pick sequence.
 
 Alias setup:
 ```bash

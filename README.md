@@ -99,7 +99,11 @@ Override the device in `config/default.yaml` if needed.
    jog, pose readback, clear error, enable/disable, and gripper DO controls.
    It can save a home pose to `config/robot_control.yaml`. Its **Auto Loop**
    tab lets you add multiple place points and repeatedly pick the first
-   detection into the next place point.
+   detection into the next place point. Its **Camera Pick** tab starts the
+   calibrated stereo camera directly, lets you click a rectified-left image
+   point, transforms the clicked depth point through `config/hand_eye.yaml`,
+   applies a robot Z offset, then moves to or picks that clicked point for
+   end-to-end calibration testing.
 
 ## Notes
 

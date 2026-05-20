@@ -36,8 +36,14 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from elp_stereo.config import project_root
+from elp_stereo.calibration import load_yaml
+from elp_stereo.camera import CaptureThread, StereoCamera
+from elp_stereo.config import load_config, project_root
+from elp_stereo.depth import DepthEngine, Rectifier, build_depth_engine
+from elp_stereo.detection.depth_pick import pixel_to_camera_xyz
+from elp_stereo.gui.widgets import ImagePanel
 from elp_stereo.hand_eye import load_hand_eye_yaml
+from elp_stereo.worker import DepthWorker
 
 try:
     import rclpy
@@ -106,6 +112,15 @@ class RobotControlWindow(QMainWindow):
         self.bringup_proc = None
         self.config_path = project_root() / "config" / "robot_control.yaml"
         self.home_pose = None
+        self.camera_cfg = load_config()
+        self.camera = None
+        self.capture = None
+        self.depth_worker = None
+        self.cam_calib = None
+        self.cam_rectifier = None
+        self.cam_depth_engine = None
+        self.latest_depth = None
+        self.clicked_robot = None
 
         self.list = QListWidget()
         self.log = QTextEdit()
@@ -140,6 +155,8 @@ class RobotControlWindow(QMainWindow):
         self.place_list.currentRowChanged.connect(self.on_place_selected)
         self.place_index_label = QLabel("Next place: 0")
         self.home_label = QLabel("Home: not set")
+        self.click_z_offset = self._spin(-0.300, 0.300, 0.000, 0.001)
+        self.click_label = QLabel("Clicked target: -")
 
         form = QFormLayout()
         form.addRow("Approach Z (m)", self.approach_z)
@@ -170,10 +187,12 @@ class RobotControlWindow(QMainWindow):
         pick_layout.addLayout(buttons)
 
         manual_tab = self.build_manual_tab()
+        camera_tab = self.build_camera_pick_tab()
         auto_tab = self.build_auto_tab()
 
         tabs = QTabWidget()
         tabs.addTab(pick_tab, "Pick")
+        tabs.addTab(camera_tab, "Camera Pick")
         tabs.addTab(manual_tab, "Manual")
         tabs.addTab(auto_tab, "Auto Loop")
 
@@ -213,6 +232,9 @@ class RobotControlWindow(QMainWindow):
             },
             "manual": {
                 "jog_step_m": self.jog_step.value(),
+            },
+            "camera_pick": {
+                "z_offset_m": self.click_z_offset.value(),
             },
             "gripper": {
                 "do_type": self.do_type.currentText(),
@@ -266,6 +288,10 @@ class RobotControlWindow(QMainWindow):
         manual = data.get("manual", {})
         if isinstance(manual, dict):
             self.jog_step.setValue(float(manual.get("jog_step_m", self.jog_step.value())))
+
+        camera_pick = data.get("camera_pick", {})
+        if isinstance(camera_pick, dict):
+            self.click_z_offset.setValue(float(camera_pick.get("z_offset_m", self.click_z_offset.value())))
 
         gripper = data.get("gripper", {})
         if isinstance(gripper, dict):
@@ -388,6 +414,182 @@ class RobotControlWindow(QMainWindow):
         layout.addWidget(do_box)
         layout.addStretch(1)
         return tab
+
+    def build_camera_pick_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.pick_image = ImagePanel("Camera Pick - Rectified Left")
+        self.pick_image.clicked.connect(self.on_camera_pick_click)
+        layout.addWidget(self.pick_image, 1)
+
+        form = QFormLayout()
+        form.addRow("Robot Z offset (m)", self.click_z_offset)
+        layout.addLayout(form)
+        layout.addWidget(self.click_label)
+
+        row = QHBoxLayout()
+        btn_start = QPushButton("Start Camera")
+        btn_stop = QPushButton("Stop Camera")
+        btn_reload = QPushButton("Reload Calib + Hand-Eye")
+        btn_move = QPushButton("Move To Click")
+        btn_pick = QPushButton("Pick Clicked")
+        btn_start.clicked.connect(self.start_camera_pick)
+        btn_stop.clicked.connect(self.stop_camera_pick)
+        btn_reload.clicked.connect(self.reload_camera_pick_calibration)
+        btn_move.clicked.connect(self.move_to_clicked_target)
+        btn_pick.clicked.connect(self.pick_clicked_target)
+        row.addWidget(btn_start)
+        row.addWidget(btn_stop)
+        row.addWidget(btn_reload)
+        row.addWidget(btn_move)
+        row.addWidget(btn_pick)
+        layout.addLayout(row)
+
+        return tab
+
+    def reload_camera_pick_calibration(self):
+        self.load_hand_eye()
+        try:
+            path = project_root() / self.camera_cfg["calibration"]["output_path"]
+            calib = load_yaml(path)
+            self._apply_camera_pick_calibration(calib)
+            self.append_log(f"Loaded camera-pick calibration: {path}")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"Camera-pick calibration failed: {exc}")
+
+    def _apply_camera_pick_calibration(self, calib):
+        w, h = calib.image_size
+        self.camera_cfg["camera"]["frame_width"] = int(w) * 2
+        self.camera_cfg["camera"]["frame_height"] = int(h)
+        self.cam_calib = calib
+        self.cam_rectifier = Rectifier(calib)
+        try:
+            self.cam_depth_engine = build_depth_engine(self.camera_cfg, self.cam_rectifier)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"Camera-pick depth fallback to SGBM: {exc}")
+            self.camera_cfg.setdefault("depth", {})["engine"] = "sgbm"
+            self.cam_depth_engine = DepthEngine(self.camera_cfg, self.cam_rectifier)
+        if self.capture is not None:
+            self._start_camera_pick_worker()
+
+    def start_camera_pick(self):
+        if self.capture is not None:
+            return
+        if self.cam_rectifier is None or self.cam_depth_engine is None:
+            self.reload_camera_pick_calibration()
+        if self.cam_rectifier is None or self.cam_depth_engine is None:
+            QMessageBox.warning(self, "Camera Pick", "Load stereo calibration first.")
+            return
+        try:
+            self.camera = StereoCamera(self.camera_cfg)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Camera Pick", f"Camera startup failed: {exc}")
+            return
+        self.capture = CaptureThread(self.camera, self)
+        self.capture.frames_ready.connect(self.on_camera_pick_frames)
+        self.capture.error.connect(lambda e: self.log_received.emit(f"Camera pick: {e}"))
+        self.capture.start()
+        self._start_camera_pick_worker()
+        self.append_log("Camera pick stream started.")
+
+    def _start_camera_pick_worker(self):
+        if self.depth_worker:
+            self.depth_worker.stop()
+        self.depth_worker = DepthWorker(self.cam_rectifier, self.cam_depth_engine, self)
+        self.depth_worker.result_ready.connect(self.on_camera_pick_depth)
+        self.depth_worker.start()
+
+    def stop_camera_pick(self):
+        if self.depth_worker:
+            self.depth_worker.stop()
+            self.depth_worker = None
+        if self.capture:
+            self.capture.stop()
+            self.capture = None
+        self.camera = None
+        self.append_log("Camera pick stream stopped.")
+
+    def on_camera_pick_frames(self, left, right):
+        if self.depth_worker:
+            self.depth_worker.submit(left, right)
+
+    def on_camera_pick_depth(self, result):
+        if "error" in result:
+            self.append_log(f"Camera pick depth error: {result['error']}")
+            return
+        self.latest_depth = result["depth_map"]
+        left = result["left"].copy()
+        if self.clicked_robot is not None:
+            xy = self.clicked_robot.get("uv")
+            if xy is not None:
+                import cv2
+                cv2.drawMarker(left, tuple(xy), (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
+        self.pick_image.show_image(left)
+
+    def on_camera_pick_click(self, x, y):
+        if self.cam_calib is None or self.cam_depth_engine is None or self.latest_depth is None:
+            QMessageBox.information(self, "Camera Pick", "Need live calibrated depth first.")
+            return
+        if self.hand_eye_T is None:
+            QMessageBox.warning(self, "Camera Pick", "Load config/hand_eye.yaml first.")
+            return
+        info = self.cam_depth_engine.pixel_info_from_map(self.latest_depth, x, y)
+        if not info.valid:
+            self.click_label.setText("Clicked target: no valid depth")
+            self.clicked_robot = None
+            return
+        cam_mm = pixel_to_camera_xyz(int(x), int(y), info.depth_mm, self.cam_calib.P1)
+        cam_m = np.asarray(cam_mm, dtype=np.float64) / 1000.0
+        robot = self.hand_eye_T @ np.array([cam_m[0], cam_m[1], cam_m[2], 1.0])
+        robot_xyz = (
+            float(robot[0]),
+            float(robot[1]),
+            float(robot[2]) + self.click_z_offset.value(),
+        )
+        self.clicked_robot = {
+            "uv": (int(x), int(y)),
+            "camera_m": tuple(float(v) for v in cam_m),
+            "robot_m": robot_xyz,
+            "depth_mm": float(info.depth_mm),
+            "std_mm": float(info.sample_std_mm),
+        }
+        self.click_label.setText(
+            "Clicked target: "
+            f"uv=({x},{y}) depth={info.depth_mm:.1f} +/-{info.sample_std_mm:.1f} mm  "
+            f"robot=({robot_xyz[0]:+.4f}, {robot_xyz[1]:+.4f}, {robot_xyz[2]:+.4f}) m"
+        )
+
+    def move_to_clicked_target(self):
+        if self.node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+        if self.clicked_robot is None:
+            QMessageBox.information(self, "Camera Pick", "Click a valid depth point first.")
+            return
+        if self.busy:
+            return
+        x, y, z = self.clicked_robot["robot_m"]
+        r = self.r_deg.value()
+        threading.Thread(target=self.manual_move_sequence, args=(x, y, z, r, False), daemon=True).start()
+
+    def pick_clicked_target(self):
+        if self.node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+        if self.clicked_robot is None:
+            QMessageBox.information(self, "Camera Pick", "Click a valid depth point first.")
+            return
+        if self.busy:
+            return
+        params = self.pick_params(use_place_list=False)
+        if params is None:
+            return
+        threading.Thread(
+            target=self.pick_sequence,
+            args=(self.clicked_robot["robot_m"], params),
+            daemon=True,
+        ).start()
 
     def build_auto_tab(self):
         tab = QWidget()
@@ -853,6 +1055,7 @@ class RobotControlWindow(QMainWindow):
         self.statusBar().showMessage(msg)
 
     def closeEvent(self, event):
+        self.stop_camera_pick()
         self.stop_bringup(silent=True)
         if self.spin:
             self.spin.stop()
