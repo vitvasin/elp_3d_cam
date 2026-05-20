@@ -999,12 +999,12 @@ class RobotControlWindow(QMainWindow):
                 return
             if not self._move(px, py, approach_z, r):
                 return
-            if not self._move(px, py, pz, r, linear=True):
+            if not self._move(px, py, pz, r):
                 return
             if not self._set_do(use_tool, idx, close_state):
                 return
             time.sleep(0.2)
-            if not self._move(px, py, approach_z, r, linear=True):
+            if not self._move(px, py, approach_z, r):
                 return
             if not self._move(place[0], place[1], place[2], r):
                 return
