@@ -156,6 +156,7 @@ class RobotControlWindow(QMainWindow):
         self.place_index_label = QLabel("Next place: 0")
         self.home_label = QLabel("Home: not set")
         self.click_z_offset = self._spin(-0.300, 0.300, 0.000, 0.001)
+        self.click_z_offset.valueChanged.connect(self.update_clicked_robot_offset)
         self.click_label = QLabel("Clicked target: -")
 
         form = QFormLayout()
@@ -544,21 +545,33 @@ class RobotControlWindow(QMainWindow):
         cam_mm = pixel_to_camera_xyz(int(x), int(y), info.depth_mm, self.cam_calib.P1)
         cam_m = np.asarray(cam_mm, dtype=np.float64) / 1000.0
         robot = self.hand_eye_T @ np.array([cam_m[0], cam_m[1], cam_m[2], 1.0])
-        robot_xyz = (
+        robot_base = (
             float(robot[0]),
             float(robot[1]),
-            float(robot[2]) + self.click_z_offset.value(),
+            float(robot[2]),
         )
         self.clicked_robot = {
             "uv": (int(x), int(y)),
             "camera_m": tuple(float(v) for v in cam_m),
-            "robot_m": robot_xyz,
+            "robot_base_m": robot_base,
             "depth_mm": float(info.depth_mm),
             "std_mm": float(info.sample_std_mm),
         }
+        self.update_clicked_robot_offset()
+
+    def update_clicked_robot_offset(self):
+        if self.clicked_robot is None or "robot_base_m" not in self.clicked_robot:
+            return
+        bx, by, bz = self.clicked_robot["robot_base_m"]
+        robot_xyz = (float(bx), float(by), float(bz) + self.click_z_offset.value())
+        self.clicked_robot["robot_m"] = robot_xyz
+        uv = self.clicked_robot.get("uv", ("-", "-"))
+        depth = self.clicked_robot.get("depth_mm", float("nan"))
+        std = self.clicked_robot.get("std_mm", float("nan"))
         self.click_label.setText(
             "Clicked target: "
-            f"uv=({x},{y}) depth={info.depth_mm:.1f} +/-{info.sample_std_mm:.1f} mm  "
+            f"uv=({uv[0]},{uv[1]}) depth={depth:.1f} +/-{std:.1f} mm  "
+            f"baseZ={bz:+.4f} offset={self.click_z_offset.value():+.4f}  "
             f"robot=({robot_xyz[0]:+.4f}, {robot_xyz[1]:+.4f}, {robot_xyz[2]:+.4f}) m"
         )
 
