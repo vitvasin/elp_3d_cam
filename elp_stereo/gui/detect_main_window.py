@@ -87,6 +87,7 @@ class DetectMainWindow(QMainWindow):
         self._publish_top1 = pick_cfg.get("mode", "top_score") == "top_score"
         self._fallback_plane = bool(det_cfg.get("depth_fallback_to_plane", True))
         self._bbox_shrink = float(det_cfg.get("bbox_shrink", 0.6))
+        self._depth_trim = float(det_cfg.get("depth_trim", 0.2))
         self._smooth_cfg = smooth_cfg
 
         # ROS2 state
@@ -196,6 +197,7 @@ class DetectMainWindow(QMainWindow):
         )
         if self.calib is not None:
             self.det_worker.set_projection(self.calib.P1)
+        self.det_worker.set_depth_trim(self._depth_trim)
         self.det_worker.set_clahe(self._clahe_on)
         if self._smoothing_on:
             self.det_worker.set_tracker(self._build_tracker())
@@ -280,6 +282,16 @@ class DetectMainWindow(QMainWindow):
                 self.status.setText(f"Calibration load failed: {exc}")
 
     def apply_calibration(self, calib):
+        expected = (
+            int(self.cfg["camera"]["frame_width"]) // 2,
+            int(self.cfg["camera"]["frame_height"]),
+        )
+        if tuple(calib.image_size) != expected:
+            raise ValueError(
+                f"Calibration image size {calib.image_size} does not match "
+                f"current camera resolution {expected}. Reload matching calibration "
+                f"or change camera resolution/swap setting."
+            )
         self.calib = calib
         self.rectifier = Rectifier(calib)
         try:

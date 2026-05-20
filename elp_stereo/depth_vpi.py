@@ -18,6 +18,7 @@ and reused via ``lock_cpu`` / ``out=`` each frame.
 """
 
 import cv2
+import inspect
 import numpy as np
 
 try:
@@ -61,9 +62,18 @@ class VPIDepthEngine(DepthEngine):
             )
         self._backend = getattr(vpi.Backend, backend_name)
         self.min_disparity = s["min_disparity"]
-        self.num_disparities = s["num_disparities"]
-        self._window = max(3, int(s.get("block_size", 5)))
+        self.num_disparities = int(vcfg.get("max_disparity", s["num_disparities"]))
+        self._window = max(3, int(vcfg.get("window_size", s.get("block_size", 5))))
         self._quality = int(vcfg.get("quality", 6))
+        self._confthreshold = int(vcfg.get("confthreshold", 32767))
+        self._mindisp = int(vcfg.get("min_disparity", 0))
+        self._p1 = int(vcfg.get("p1", 3))
+        self._p2 = int(vcfg.get("p2", 48))
+        self._p2alpha = int(vcfg.get("p2alpha", 0))
+        self._uniqueness = float(vcfg.get("uniqueness", -1.0))
+        self._include_diagonals = bool(vcfg.get("include_diagonals", True))
+        self._num_passes = int(vcfg.get("num_passes", 3))
+        self._stereodisp_params = self._supported_stereodisp_params()
         # SGBM-only knobs ignored on VPI.
         self.use_wls = False
         self._left_matcher = None
@@ -83,6 +93,37 @@ class VPIDepthEngine(DepthEngine):
         # OFA outputs block-linear; reconvert to pitch-linear S16 for numpy read.
         self._vd_bl = vpi.Image(size=(W, H), format=vpi.Format.S16_BL)
         self._vd = vpi.Image(size=(W, H), format=vpi.Format.S16)
+
+    def _supported_stereodisp_params(self):
+        """Return supported keyword params; older VPI versions expose fewer knobs."""
+        try:
+            return set(inspect.signature(vpi.stereodisp).parameters)
+        except (TypeError, ValueError):
+            return {
+                "out", "backend", "window", "maxdisp",
+                "confthreshold", "quality",
+            }
+
+    def _stereodisp_kwargs(self, out):
+        kwargs = {
+            "out": out,
+            "backend": self._backend,
+            "window": self._window,
+            "maxdisp": self.num_disparities,
+            "confthreshold": self._confthreshold,
+            "quality": self._quality,
+            "mindisp": self._mindisp,
+            "p1": self._p1,
+            "p2": self._p2,
+            "p2alpha": self._p2alpha,
+            "uniqueness": self._uniqueness,
+            "includediagonals": self._include_diagonals,
+            "numpasses": self._num_passes,
+        }
+        return {
+            key: value for key, value in kwargs.items()
+            if key in self._stereodisp_params
+        }
 
     def compute(self, left_rect, right_rect):
         gl = cv2.cvtColor(left_rect, cv2.COLOR_BGR2GRAY)
@@ -107,21 +148,13 @@ class VPIDepthEngine(DepthEngine):
         if self._backend == vpi.Backend.OFA:
             vpi.stereodisp(
                 self._vl_bl, self._vr_bl,
-                out=self._vd_bl,
-                backend=self._backend,
-                window=self._window,
-                maxdisp=self.num_disparities,
-                quality=self._quality,
+                **self._stereodisp_kwargs(self._vd_bl),
             )
             self._vd_bl.convert(out=self._vd, backend=vpi.Backend.VIC)
         else:
             vpi.stereodisp(
                 self._vl_bl, self._vr_bl,
-                out=self._vd,
-                backend=self._backend,
-                window=self._window,
-                maxdisp=self.num_disparities,
-                quality=self._quality,
+                **self._stereodisp_kwargs(self._vd),
             )
 
         with self._vd.rlock_cpu() as arr:
@@ -132,7 +165,7 @@ class VPIDepthEngine(DepthEngine):
 
     def update_params(self, params):
         """Apply param changes. SGBM-specific keys are ignored (no matcher)."""
-        self._cfg["sgbm"].update(params.get("sgbm", {}))
+        # VPI has its own tunables; keep SGBM config independent in the UI/file.
         if "min_depth_mm" in params:
             self.min_depth_mm = float(params["min_depth_mm"])
         if "max_depth_mm" in params:
@@ -142,6 +175,10 @@ class VPIDepthEngine(DepthEngine):
             n = max(1, int(params["temporal_frames"]))
             self.temporal_frames = n
             self._depth_buffer = deque(maxlen=n)
+        if "sample_radius_px" in params:
+            self.sample_radius_px = max(0, int(params["sample_radius_px"]))
+        if "sample_trim" in params:
+            self.sample_trim = max(0.0, min(0.45, float(params["sample_trim"])))
         if "vpi" in params:
             self._cfg.setdefault("vpi", {}).update(params["vpi"])
         self._build_matchers()

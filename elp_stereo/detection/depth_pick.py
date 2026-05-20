@@ -57,6 +57,49 @@ def bbox_robust_depth(depth_map, bbox, shrink=0.6):
     return (float(np.median(valid)), int(valid.size))
 
 
+def bbox_trimmed_depth(depth_map, bbox, shrink=0.6, trim=0.2):
+    """Robust bbox depth with trimmed median/std.
+
+    Returns ``(z_mm, valid_count, std_mm)``. ``trim`` removes equal fractions of
+    low/high finite values after shrinking the bbox, reducing edge/background
+    bleed for small targets.
+    """
+    if depth_map is None:
+        return (float("nan"), 0, float("nan"))
+    h, w = depth_map.shape
+    x1, y1, x2, y2 = bbox
+    bw = max(1, int(x2) - int(x1))
+    bh = max(1, int(y2) - int(y1))
+    s = max(1e-3, min(1.0, float(shrink)))
+    cx = (int(x1) + int(x2)) / 2.0
+    cy = (int(y1) + int(y2)) / 2.0
+    hw = bw * s / 2.0
+    hh = bh * s / 2.0
+    sx1 = max(0, int(round(cx - hw)))
+    sy1 = max(0, int(round(cy - hh)))
+    sx2 = min(w, int(round(cx + hw)))
+    sy2 = min(h, int(round(cy + hh)))
+    if sx2 <= sx1 or sy2 <= sy1:
+        return (float("nan"), 0, float("nan"))
+    vals = depth_map[sy1:sy2, sx1:sx2]
+    vals = vals[np.isfinite(vals)]
+    vals = vals[vals > 0]
+    if vals.size == 0:
+        return (float("nan"), 0, float("nan"))
+    vals = np.sort(vals.astype(np.float32))
+    t = max(0.0, min(0.45, float(trim)))
+    cut = int(vals.size * t)
+    if cut > 0 and vals.size > 2 * cut:
+        vals = vals[cut:-cut]
+    if vals.size == 0:
+        return (float("nan"), 0, float("nan"))
+    return (
+        float(np.median(vals)),
+        int(vals.size),
+        float(np.std(vals)) if vals.size > 1 else 0.0,
+    )
+
+
 def pixel_to_camera_xyz(u, v, z_mm, P1):
     """Back-project rectified-left pixel + depth to camera-frame XYZ (mm).
 

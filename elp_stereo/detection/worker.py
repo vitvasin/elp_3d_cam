@@ -7,7 +7,7 @@ import threading
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from .depth_pick import bbox_robust_depth, pixel_to_camera_xyz
+from .depth_pick import bbox_trimmed_depth, pixel_to_camera_xyz
 from .plane import plane_z_at
 from .preproc import clahe_bgr
 from .tiler import TiledDetector
@@ -41,6 +41,7 @@ class DetectionWorker(QThread):
         self._min_valid = int(min_valid_pixels)
         self._shrink = float(bbox_shrink)
         self._fallback_to_plane = bool(fallback_to_plane)
+        self._depth_trim = 0.2
         self._P1 = None
         self._plane = None
         self._tracker = None
@@ -58,6 +59,9 @@ class DetectionWorker(QThread):
 
     def set_bbox_shrink(self, s):
         self._shrink = float(s)
+
+    def set_depth_trim(self, trim):
+        self._depth_trim = max(0.0, min(0.45, float(trim)))
 
     def set_detector(self, detector):
         self._detector = detector
@@ -152,7 +156,9 @@ class DetectionWorker(QThread):
             x1, y1, x2, y2 = det.bbox
             u = (x1 + x2) // 2
             v = (y1 + y2) // 2
-            z, n = bbox_robust_depth(depth_map, det.bbox, self._shrink)
+            z, n, std = bbox_trimmed_depth(
+                depth_map, det.bbox, self._shrink, self._depth_trim
+            )
             source = "stereo"
             valid = n
             if (math.isnan(z) or n < self._min_valid):
@@ -168,6 +174,7 @@ class DetectionWorker(QThread):
                 "uv": (int(u), int(v)),
                 "xyz_mm": xyz,
                 "valid_pixels": int(valid),
+                "depth_std_mm": float(std) if std == std else float("nan"),
                 "depth_source": source,
             })
         return items

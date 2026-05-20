@@ -64,6 +64,8 @@ class PixelInfo:
     error_mm: float = 0.0          # +/- band from disparity quantization
     range_min_mm: float = 0.0      # nearest detectable depth (global)
     range_max_mm: float = 0.0      # farthest detectable depth (global)
+    sample_count: int = 0
+    sample_std_mm: float = 0.0     # local depth spread after robust filtering
 
 
 class DepthEngine:
@@ -81,6 +83,8 @@ class DepthEngine:
         # 1/sqrt(N) for static scenes. Higher = cleaner depth, more latency.
         self.temporal_frames = int(self._cfg.get("temporal_frames", 1))
         self._depth_buffer = deque(maxlen=max(1, self.temporal_frames))
+        self.sample_radius_px = int(self._cfg.get("sample_radius_px", 3))
+        self.sample_trim = float(self._cfg.get("sample_trim", 0.2))
         self._build_matchers()
         # Last computed frame state (set by compute()).
         self.disparity = None      # float32, true disparity in px, NaN = invalid
@@ -136,7 +140,48 @@ class DepthEngine:
             n = max(1, int(params["temporal_frames"]))
             self.temporal_frames = n
             self._depth_buffer = deque(maxlen=n)
+        if "sample_radius_px" in params:
+            self.sample_radius_px = max(0, int(params["sample_radius_px"]))
+        if "sample_trim" in params:
+            self.sample_trim = max(0.0, min(0.45, float(params["sample_trim"])))
         self._build_matchers()
+
+    def robust_depth_sample(self, depth_map, x, y, radius_px=None, trim=None):
+        """Robust local depth sample around ``(x, y)``.
+
+        Returns ``(median_mm, count, std_mm)`` using finite pixels in a square
+        ROI. ``trim`` discards equal fractions of low/high sorted depths before
+        computing stats, which suppresses edge bleed and SGBM outliers.
+        """
+        if depth_map is None:
+            return (float("nan"), 0, float("nan"))
+        h, w = depth_map.shape
+        if not (0 <= x < w and 0 <= y < h):
+            return (float("nan"), 0, float("nan"))
+        r = self.sample_radius_px if radius_px is None else int(radius_px)
+        r = max(0, r)
+        x1 = max(0, int(x) - r)
+        x2 = min(w, int(x) + r + 1)
+        y1 = max(0, int(y) - r)
+        y2 = min(h, int(y) + r + 1)
+        vals = depth_map[y1:y2, x1:x2]
+        vals = vals[np.isfinite(vals)]
+        vals = vals[vals > 0]
+        if vals.size == 0:
+            return (float("nan"), 0, float("nan"))
+        vals = np.sort(vals.astype(np.float32))
+        t = self.sample_trim if trim is None else float(trim)
+        t = max(0.0, min(0.45, t))
+        cut = int(vals.size * t)
+        if cut > 0 and vals.size > 2 * cut:
+            vals = vals[cut:-cut]
+        if vals.size == 0:
+            return (float("nan"), 0, float("nan"))
+        return (
+            float(np.median(vals)),
+            int(vals.size),
+            float(np.std(vals)) if vals.size > 1 else 0.0,
+        )
 
     def compute(self, left_rect, right_rect):
         """Compute disparity + depth from a rectified pair. Returns the depth map."""
@@ -217,14 +262,15 @@ class DepthEngine:
         h, w = depth_map.shape
         if not (0 <= x < w and 0 <= y < h):
             return PixelInfo(valid=False, range_min_mm=rmin, range_max_mm=rmax)
-        z = float(depth_map[y, x])
+        z, n, std = self.robust_depth_sample(depth_map, x, y)
         if not np.isfinite(z) or z <= 0:
             return PixelInfo(valid=False, range_min_mm=rmin, range_max_mm=rmax)
         f = self.rectifier.fx
         b = self.rectifier.baseline
         error = (z * z) / (f * b) * self.delta_d
         return PixelInfo(valid=True, depth_mm=z, error_mm=error,
-                         range_min_mm=rmin, range_max_mm=rmax)
+                         range_min_mm=rmin, range_max_mm=rmax,
+                         sample_count=n, sample_std_mm=std)
 
     def pixel_info(self, x, y):
         """Depth + uncertainty band + detection range at pixel ``(x, y)``."""

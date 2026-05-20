@@ -59,8 +59,12 @@ class StereoCamera:
         self.frame_height = cam["frame_height"]
         self.fourcc = cam.get("fourcc", "MJPG")
         self.fps = cam.get("fps", 30)
+        self.swap_left_right = bool(cam.get("swap_left_right", False))
         self.unsynced = self.mode == "dual"
         self._caps = []
+        self.actual_frame_width = None
+        self.actual_frame_height = None
+        self.actual_fps = None
 
     def open(self):
         if self.mode == "sbs":
@@ -72,6 +76,7 @@ class StereoCamera:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
             cap.set(cv2.CAP_PROP_FPS, self.fps)
             self._caps = [cap]
+            self._update_actual_format()
         else:
             left, right = self.spec
             for dev in (left, right):
@@ -83,7 +88,28 @@ class StereoCamera:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
                 cap.set(cv2.CAP_PROP_FPS, self.fps)
                 self._caps.append(cap)
+            self._update_actual_format()
         return self
+
+    def _update_actual_format(self):
+        """Record the negotiated capture mode after V4L2 accepts or adjusts it."""
+        if not self._caps:
+            return
+        cap = self._caps[0]
+        w = int(round(cap.get(cv2.CAP_PROP_FRAME_WIDTH)))
+        h = int(round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if self.mode == "dual":
+            w *= 2
+        self.actual_frame_width = w
+        self.actual_frame_height = h
+        self.actual_fps = float(fps) if fps else None
+
+    def actual_per_eye_size(self):
+        """Return negotiated per-eye ``(width, height)`` if capture is open."""
+        if self.actual_frame_width is None or self.actual_frame_height is None:
+            return None
+        return (self.actual_frame_width // 2, self.actual_frame_height)
 
     def grab(self):
         """Return ``(left, right)`` BGR frames, or ``None`` on read failure."""
@@ -92,7 +118,11 @@ class StereoCamera:
             if not ok or frame is None:
                 return None
             mid = frame.shape[1] // 2
-            return frame[:, :mid].copy(), frame[:, mid:].copy()
+            left = frame[:, :mid].copy()
+            right = frame[:, mid:].copy()
+            if self.swap_left_right:
+                return right, left
+            return left, right
         else:
             # Grab both first to minimize the inter-device time skew.
             self._caps[0].grab()
@@ -101,6 +131,8 @@ class StereoCamera:
             ok_r, right = self._caps[1].retrieve()
             if not (ok_l and ok_r) or left is None or right is None:
                 return None
+            if self.swap_left_right:
+                return right, left
             return left, right
 
     def release(self):

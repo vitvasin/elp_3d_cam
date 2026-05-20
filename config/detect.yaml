@@ -2,6 +2,9 @@
 # Camera / depth blocks come from config/default.yaml (deep-merged at runtime).
 
 calibration_path: "config/stereo_calib.yaml"
+# If present, app_detect.py loads this hand-eye calibration at startup and uses
+# it as the robot_base -> camera_optical_frame static TF.
+hand_eye_path: "config/hand_eye.yaml"
 
 detection:
   # Path to .pt (Ultralytics) or .onnx (onnxruntime, YOLOv8 head).
@@ -16,6 +19,8 @@ detection:
   min_valid_pixels: 5
   # Inner fraction of the bbox sampled for depth median (avoids edge bleed).
   bbox_shrink: 0.6
+  # Trim low/high fractions inside the shrunken bbox before median depth.
+  depth_trim: 0.2
   # If true and stereo depth in bbox is too sparse, use plane_z_at(tray) at the
   # bbox center. Requires "Fit Tray Plane" to be run at least once.
   depth_fallback_to_plane: true

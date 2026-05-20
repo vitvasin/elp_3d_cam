@@ -11,6 +11,9 @@ env/
 
 # Calibration output (auto-generated, not source)
 config/stereo_calib.yaml
+config/hand_eye.yaml
+config/robot_control.yaml
+config/saved_params.yaml
 
 # Captured image datasets
 images/

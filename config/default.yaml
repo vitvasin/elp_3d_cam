@@ -5,11 +5,13 @@ camera:
   device_match: "3D_USB_Camera"
   # Manual override: explicit /dev/videoN path, or null for auto-detect.
   device_override: null
-  # Full side-by-side frame size (left|right concatenated). 2560x720 = 2x 1280x720.
-  frame_width: 2560
-  frame_height: 720
+  # Full side-by-side frame size (left|right concatenated). 3840x1080 = 2x 1920x1080.
+  frame_width: 3840
+  frame_height: 1080
   fourcc: "MJPG"
-  fps: 30
+  fps: 5
+  # If true, swap returned left/right images after capture. Recalibrate after changing.
+  swap_left_right: false
 
 calibration:
   # Where calibration results are written / auto-loaded from on startup.
@@ -50,8 +52,21 @@ depth:
     # Backend: "OFA" (dedicated stereo HW, fastest, best for Orin) or "CUDA".
     # Avoid CUDA on 4 GB Orin Nano at >= 720p (OOM under memory pressure).
     backend: "OFA"
-    # PVA+NVENC+VIC quality knob, 1..8. Ignored by OFA/CUDA but harmless.
+    # Quality knob, 1..8. Higher can improve disparity at more compute cost.
     quality: 6
+    # Main VPI stereo search/window controls.
+    max_disparity: 128
+    window_size: 5
+    min_disparity: 0
+    # Reject low-confidence disparity. Lower keeps more pixels; higher is stricter.
+    confthreshold: 32767
+    # SGM smoothness/ambiguity controls when supported by the installed VPI.
+    p1: 3
+    p2: 48
+    p2alpha: 0
+    uniqueness: -1.0
+    include_diagonals: true
+    num_passes: 3
 
   sgbm:
     min_disparity: 0
@@ -82,3 +97,7 @@ depth:
   # Temporal averaging over N frames. 1 = off. Higher = cleaner depth for slow
   # or static scenes (noise drops as 1/sqrt(N)). Adds N-frame latency.
   temporal_frames: 1
+  # Pixel readout uses a robust local ROI instead of one noisy pixel.
+  # radius 3 = 7x7 window; trim 0.2 drops 20% low/high samples before median.
+  sample_radius_px: 3
+  sample_trim: 0.2

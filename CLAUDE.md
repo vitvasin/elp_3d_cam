@@ -12,6 +12,10 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
 1. Synchronized left / right / depth panels.
 2. Stereo calibration — chessboard, ChArUco, or circle-grid (symmetric / asymmetric).
 3. Per-pixel depth (mm) with uncertainty band. CPU SGBM or NVIDIA VPI (Jetson).
+4. Rectified RGB click matching: click left/right RGB to show the matched pixel,
+   disparity, and depth readout in rectified-left depth coordinates.
+5. ImagePanel supports wheel zoom, drag pan, and toolbar zoom/reset.
+6. Toolbar exposes per-eye resolution, FPS presets, and left/right swap.
 
 **App 2 — `app_detect.py` (object detection + ROS2 publisher)**
 1. Loads calibration from App 1, runs depth pipeline.
@@ -21,6 +25,26 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
    shrink-bbox depth pick, centroid-EMA smoothing of top-1.
 4. Publishes top-1 (or all) detections to `vision_msgs/Detection3DArray` on
    `/elp/detections` + static TF `robot_base → camera_optical_frame`.
+
+**App 3 — `app_handeye.py` (ELP <-> MG400 eye-to-hand calibration)**
+1. Uses the existing ELP stereo calibration/depth path.
+2. Click rectified-left TCP/calibration point, read `/mg400/get_pose`.
+3. Alternative collection: ArUco marker centroid from stereo depth, or ArUco
+   solvePnP from known marker size.
+4. Auto calibration: moves MG400 through a configurable grid and auto-collects
+   stable ArUco observations.
+5. Solves `p_robot = R @ p_camera + t` and saves `config/hand_eye.yaml`.
+6. `app_detect.py` auto-loads this file and applies it to ROS2 static TF.
+
+**App 4 — `app_robot_control.py` (MG400 pick controller)**
+1. Subscribes to `/elp/detections`.
+2. Uses robot-frame detections from App 2, or falls back to `config/hand_eye.yaml`
+   if detections are still in `camera_optical_frame`.
+3. Executes a simple approach/pick/lift/place/release sequence through MG400
+   `MovJ`/`MovL` actions and DO services.
+4. Includes tabs for detection picking, manual Cartesian control/jog/DO,
+   clear-error/enable/disable, and an auto loop with editable place points.
+5. Saves home pose and robot-control preferences to `config/robot_control.yaml`.
 
 ## Hardware
 
@@ -42,12 +66,17 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
 ```
 app.py                          App 1 entry. Calibration + depth viewer.
 app_detect.py                   App 2 entry. Detection + ROS2 publisher. Deep-merges detect.yaml.
+app_handeye.py                  App 3 entry. ELP stereo depth + MG400 pose hand-eye calibration.
+app_robot_control.py            App 4 entry. Consumes /elp/detections and drives MG400 pick/place.
+scripts/add_app_aliases.sh      Idempotently adds elp-calib/detect/handeye/robot aliases to ~/.bashrc.
 config/default.yaml             Camera + depth + calibration board params.
+config/saved_params.yaml        GUI-saved camera/depth overrides. Auto-merged on startup. In .gitignore.
 config/detect.yaml              Detection + ROS2 + optimization params (App 2 overlay).
 config/stereo_calib.yaml        Calibration output. Auto-loaded by both apps. In .gitignore.
+config/hand_eye.yaml            Hand-eye output. Auto-loaded by App 2 and App 4. In .gitignore if local-only.
 
 elp_stereo/
-  config.py                     load_config(path=None) → dict. project_root() → Path.
+  config.py                     load_config(path=None) → dict, save_config(cfg,path=None), project_root() → Path.
   camera.py                     StereoCamera, CaptureThread (QThread).
   targets.py                    ChessboardTarget, CharucoTarget, CircleGridTarget, build_target(kind, cfg).
   calibration.py                StereoCalibrator, CalibrationResult, save_yaml, load_yaml.
@@ -69,9 +98,12 @@ elp_stereo/
     __init__.py                 ROS2_AVAILABLE probe.
     publisher.py                DetectionPublisher (Node) + RosSpinThread.
     tf_utils.py                 static_transform_from_config, lookup_camera_to_robot, transform_point_mm.
+    mg400.py                    MG400Node + spin thread helper for hand-eye / robot control apps.
+
+  hand_eye.py                   Rigid transform solve/save/load helpers for robot_base<-camera.
 
   gui/
-    widgets.py                  ImagePanel (QLabel + click→image coords signal).
+    widgets.py                  ImagePanel (QLabel + click→image coords signal, zoom/pan).
     main_window.py              App 1 MainWindow.
     calib_widget.py             Calibration tab UI.
     depth_widget.py             Depth tab UI (SGBM sliders + pixel readout).
@@ -93,16 +125,21 @@ CaptureThread  ──frames_ready(left, right)──►  MainWindow.on_frames_re
                                                     ▼
                                                rectify → engine.compute (SGBM or VPI) → reprojectImageTo3D
                                                     │
-                                         result_ready({left, right, color, depth_map})
+                                         result_ready({left, right, color, depth_map, disparity})
                                                     │
                                                     ▼
                                                MainWindow.on_depth_result
                                                → update 3 ImagePanels (GUI thread)
-                                               → store _latest_depth_map (snapshot copy)
+                                               → store _latest_depth_map / _latest_disparity snapshots
 
 ImagePanel.clicked(x,y)  ──►  MainWindow.on_depth_click
                                → DepthEngine.pixel_info_from_map(_latest_depth_map, x, y)
                                → DepthWidget.show_pixel_info(info)
+
+Left/Right ImagePanel.clicked(x,y)
+                               → robust disparity sample + optional patch refinement
+                               → draw matched RGB crosshairs
+                               → update stereo-match labels and depth readout
 ```
 
 ## Key classes and APIs
@@ -189,6 +226,12 @@ engine = build_depth_engine(cfg, rectifier)   # picks engine from cfg["depth"]["
 ```
 
 - **Backend:** `vpi.backend` config = `"OFA"` (dedicated stereo HW on Orin, frees CPU + GPU; default) or `"CUDA"`. On 4 GB Orin Nano avoid CUDA at ≥ 720p — NvMap OOM.
+- **VPI GUI controls:** backend (`OFA`/`CUDA`), quality, max/min disparity,
+  window size, confidence threshold, P1/P2/P2 alpha, uniqueness, include
+  diagonals, and number of passes.
+  These are stored under `depth.vpi.max_disparity` and `depth.vpi.window_size`
+  etc. so VPI tuning does not overwrite SGBM tuning. Unsupported VPI keywords
+  are filtered at runtime for older installed VPI versions.
 - **Subpixel:** VPI disparity is Q10.5 (1/32 px) — `delta_d = 1/32` (overrides config).
 - **Buffer reuse:** All VPI images are pre-allocated in `_build_matchers`; `compute()` copies new frames in via `lock_cpu` and runs conversions with `out=` targets. Without this, the NvMap allocator pool exhausts after ~10 frames at HD.
 - **Pipeline:** U8 → Y16_ER (CUDA scale ×256) → Y16_ER_BL (VIC) → `stereodisp` (OFA, S16_BL out) → S16 (VIC) → numpy → `_finalize_depth`.
@@ -209,7 +252,7 @@ worker.submit(left, right)          # call from any thread; drops stale frames
 worker.stop()
 ```
 
-Result dict: `{"left": ndarray, "right": ndarray, "color": ndarray, "depth_map": ndarray}`
+Result dict: `{"left": ndarray, "right": ndarray, "color": ndarray, "depth_map": ndarray, "disparity": ndarray}`
 
 ## Threading rules
 
@@ -239,11 +282,31 @@ calibration:
 
 depth:
   engine: "vpi"                     # "sgbm" (CPU) | "vpi" (Jetson, OFA/CUDA)
-  vpi:    {backend: "OFA", quality: 6}
+  vpi:    {backend: "OFA", quality: 6, max_disparity: 128, window_size: 5, confthreshold: 32767, ...}
   sgbm:   {min_disparity: 0, num_disparities: 128, block_size: 5, mode: "SGBM_3WAY", ...}
   use_wls_filter: false
   subpixel_delta_disparity: 0.0625  # 1/16 px (SGBM only; VPI uses 1/32 internally)
 ```
+
+`config/saved_params.yaml` is generated by the App 1 **Save Parameters** toolbar
+action and is deep-merged over `config/default.yaml` by `load_config()`. It is
+runtime/user tuning state, not source configuration.
+
+Calibration safety:
+- `camera.swap_left_right`, per-eye resolution, and physical stereo rig pose are
+  part of the calibration contract.
+- App 1 clears active calibration when resolution or swap changes.
+- App 2 and App 3 validate `calib.image_size == (frame_width // 2, frame_height)`
+  before building a rectifier.
+- If left/right order changes, recalibrate; image size validation cannot detect
+  a wrong-order calibration by itself.
+
+Alias setup:
+```bash
+./scripts/add_app_aliases.sh
+source ~/.bashrc
+```
+Adds `elp-calib`, `elp-detect`, `elp-handeye`, and `elp-robot`.
 
 ## OpenCV version compatibility
 
@@ -356,6 +419,10 @@ python app.py            # App 1 (calibration + depth viewer)
 #   sudo apt install ros-<distro>-vision-msgs ros-<distro>-tf2-ros
 #   source /opt/ros/<distro>/setup.bash
 python app_detect.py
+
+# App 3 / 4 — MG400 ROS2 env must expose mg400_msgs:
+python app_handeye.py
+python app_robot_control.py
 ```
 
 ## Smoke test (no display needed)

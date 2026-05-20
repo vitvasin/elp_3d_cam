@@ -20,6 +20,7 @@ class DepthWorker(QThread):
         ``right``     – rectified right BGR ndarray
         ``color``     – colorized depth BGR ndarray
         ``depth_map`` – float32 depth in mm, NaN = invalid (snapshot copy)
+        ``disparity`` – float32 left-to-right disparity in px, NaN = invalid
     """
 
     result_ready = pyqtSignal(object)
@@ -59,12 +60,15 @@ class DepthWorker(QThread):
 
             dm = self._engine.depth_map
             dm_copy = dm.copy() if dm is not None else None
+            disp = self._engine.disparity
+            disp_copy = disp.copy() if disp is not None else None
 
             self.result_ready.emit({
                 "left": lr,
                 "right": rr,
                 "color": color,
                 "depth_map": dm_copy,
+                "disparity": disp_copy,
             })
 
     def stop(self):

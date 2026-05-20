@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QApplication
 
 from elp_stereo.config import load_config, project_root
 from elp_stereo.gui.detect_main_window import DetectMainWindow
+from elp_stereo.hand_eye import load_hand_eye_yaml, static_tf_config
 
 
 def _deep_merge(base, overlay):
@@ -33,6 +34,14 @@ def load_detect_config():
         with open(overlay_path, "r") as f:
             overlay = yaml.safe_load(f) or {}
         _deep_merge(cfg, overlay)
+    hand_eye_path = project_root() / cfg.get("hand_eye_path", "config/hand_eye.yaml")
+    if hand_eye_path.is_file():
+        hand_eye, _ = load_hand_eye_yaml(hand_eye_path)
+        ros_cfg = cfg.setdefault("ros2", {})
+        ros_cfg["camera_frame"] = hand_eye.get("child_frame", ros_cfg.get("camera_frame", "camera_optical_frame"))
+        ros_cfg["robot_frame"] = hand_eye.get("parent_frame", ros_cfg.get("robot_frame", "robot_base"))
+        ros_cfg["use_tf_lookup"] = True
+        ros_cfg["static_tf"] = static_tf_config(hand_eye)
     return cfg
 
 
