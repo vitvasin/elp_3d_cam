@@ -352,6 +352,15 @@ class HandEyeWindow(QMainWindow):
         self.capture.error.connect(lambda e: self.statusBar().showMessage(e))
         self.capture.start()
 
+    def restart_camera(self):
+        if self.depth_worker:
+            self.depth_worker.stop()
+            self.depth_worker = None
+        if self.capture:
+            self.capture.stop()
+            self.capture = None
+        self.start_camera()
+
     def try_load_calibration(self):
         path = self.cfg.get("calibration_path") or self.cfg["calibration"]["output_path"]
         full = project_root() / path
@@ -379,11 +388,13 @@ class HandEyeWindow(QMainWindow):
             int(self.cfg["camera"]["frame_height"]),
         )
         if tuple(calib.image_size) != expected:
-            raise ValueError(
-                f"Calibration image size {calib.image_size} does not match "
-                f"current camera resolution {expected}. Reload matching calibration "
-                f"or change camera resolution/swap setting."
+            w, h = calib.image_size
+            self.cfg["camera"]["frame_width"] = int(w) * 2
+            self.cfg["camera"]["frame_height"] = int(h)
+            self.statusBar().showMessage(
+                f"Camera resolution changed to {w}x{h} per eye for calibration."
             )
+            self.restart_camera()
         self.calib = calib
         self.rectifier = Rectifier(calib)
         if self.capture is None:
