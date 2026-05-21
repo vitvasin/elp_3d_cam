@@ -268,6 +268,7 @@ class HandEyeWindow(QMainWindow):
         self.aruco_marker_size.setSingleStep(5.0)
         self.aruco_marker_size.setValue(40.0)
         self.aruco_use_pnp = QCheckBox("Use PnP from marker size")
+        self.aruco_use_pnp.toggled.connect(self.on_aruco_pnp_toggled)
         self.aruco_auto_collect = QCheckBox("Auto collect when stable")
         form.addRow("Dictionary", self.aruco_dict_combo)
         form.addRow("Marker ID", self.aruco_id)
@@ -605,25 +606,66 @@ class HandEyeWindow(QMainWindow):
             self.depth_engine = None
             self.depth_worker = None
             return
+        if self.aruco_use_pnp.isChecked():
+            self.stop_depth_worker()
+            self.latest_depth = None
+            self.depth_panel.clear_image("Depth disabled in PnP mode")
+            return
+        self.start_depth_worker()
+
+    def stop_depth_worker(self):
+        if self.depth_worker:
+            self.depth_worker.stop()
+            self.depth_worker = None
+
+    def start_depth_worker(self):
+        if self.rectifier is None or self.capture is None:
+            return
         try:
             self.depth_engine = build_depth_engine(self.cfg, self.rectifier)
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"Depth engine fallback to SGBM: {exc}")
             self.depth_engine = DepthEngine(self.cfg, self.rectifier)
-        if self.capture is not None:
-            if self.depth_worker:
-                self.depth_worker.stop()
-            self.depth_worker = DepthWorker(self.rectifier, self.depth_engine, self)
-            self.depth_worker.result_ready.connect(self.on_depth_result)
-            self.depth_worker.start()
+        self.stop_depth_worker()
+        self.depth_worker = DepthWorker(self.rectifier, self.depth_engine, self)
+        self.depth_worker.result_ready.connect(self.on_depth_result)
+        self.depth_worker.start()
+
+    def on_aruco_pnp_toggled(self, checked):
+        self.marker_tvec = None
+        self.marker_stable_count = 0
+        if checked:
+            self.stop_depth_worker()
+            self.latest_depth = None
+            self.depth_panel.clear_image("Depth disabled in PnP mode")
+            self.aruco_status.setText("PnP mode: camera depth is disabled")
+            self.statusBar().showMessage("PnP mode enabled; stereo depth is disabled for ArUco collection.")
+        else:
+            if self.rectifier is not None and self.capture is not None:
+                self.start_depth_worker()
+            self.aruco_status.setText("Depth mode: waiting for marker and depth")
+            self.statusBar().showMessage("PnP mode disabled; stereo depth is enabled.")
 
     def on_frames(self, left, right):
-        if self.depth_worker:
+        if self.aruco_use_pnp.isChecked() and self.rectifier is not None:
+            try:
+                left_rect, _right_rect = self.rectifier.rectify(left, right)
+            except Exception as exc:  # noqa: BLE001
+                self.statusBar().showMessage(f"Rectification failed: {exc}")
+                return
+            self.latest_left = left_rect
+            self.latest_depth = None
+            left_vis = left_rect.copy()
+            self.update_aruco(left_vis)
+            self.left_panel.show_image(left_vis)
+        elif self.depth_worker:
             self.depth_worker.submit(left, right)
         else:
             self.left_panel.show_image(left)
 
     def on_depth_result(self, result):
+        if self.aruco_use_pnp.isChecked():
+            return
         if "error" in result:
             self.statusBar().showMessage(result["error"])
             return

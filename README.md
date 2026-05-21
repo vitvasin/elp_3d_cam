@@ -93,6 +93,8 @@ Override the device in `config/default.yaml` if needed.
    moves the robot through a configurable grid and auto-collects stable ArUco
    observations. *Use Current Pose* reads the live robot pose into the sequence
    center, and auto-collection accepts only one ArUco observation per grid pose.
+   When ArUco PnP is enabled, stereo depth is disabled for marker collection and
+   the marker pose comes from the calibrated camera intrinsics plus marker size.
    Its right-side Robot Control panel can launch/stop MG400
    bringup, clear/enable/disable the robot, read pose, and send a basic MoveJ.
 5. **Runtime pick flow** — `app_detect.py` auto-loads `config/hand_eye.yaml`

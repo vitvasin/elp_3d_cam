@@ -50,6 +50,17 @@ class ImagePanel(QLabel):
         self._update_draw_rect()
         self.update()
 
+    def clear_image(self, text=None):
+        """Clear the current image and show optional placeholder text."""
+        self._src_size = None
+        self._draw_rect = None
+        self._pixmap_src = None
+        self._zoom = 1.0
+        self._pan = [0.0, 0.0]
+        if text is not None:
+            self.setText(text)
+        self.update()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_start = event.pos()
