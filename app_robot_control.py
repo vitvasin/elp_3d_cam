@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStatusBar,
     QTabWidget,
@@ -178,18 +179,18 @@ class RobotControlWindow(QMainWindow):
         buttons = QHBoxLayout()
         buttons.addWidget(btn_pick)
         buttons.addWidget(btn_reload)
-        buttons.addWidget(self.auto_pick)
 
         pick_tab = QWidget()
         pick_layout = QVBoxLayout(pick_tab)
         pick_layout.addWidget(QLabel("Detections from /elp/detections"))
         pick_layout.addWidget(self.list, 1)
         pick_layout.addLayout(form)
+        pick_layout.addWidget(self.auto_pick)
         pick_layout.addLayout(buttons)
 
-        manual_tab = self.build_manual_tab()
+        manual_tab = self.scrollable(self.build_manual_tab())
         camera_tab = self.build_camera_pick_tab()
-        auto_tab = self.build_auto_tab()
+        auto_tab = self.scrollable(self.build_auto_tab())
 
         tabs = QTabWidget()
         tabs.addTab(pick_tab, "Pick")
@@ -213,6 +214,12 @@ class RobotControlWindow(QMainWindow):
         self.load_robot_config()
         self.load_hand_eye()
         self.start_ros()
+
+    def scrollable(self, widget):
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(widget)
+        return area
 
     def _spin(self, lo, hi, value, step):
         s = QDoubleSpinBox()
@@ -391,18 +398,18 @@ class RobotControlWindow(QMainWindow):
     def build_robot_state_box(self):
         state_box = QGroupBox("Robot State")
         state_layout = QVBoxLayout(state_box)
-        bringup_row = QHBoxLayout()
+        bringup_row = QGridLayout()
         btn_launch = QPushButton("Launch Bringup")
         btn_stop = QPushButton("Stop Bringup")
         btn_check = QPushButton("Check Services")
         btn_launch.clicked.connect(self.launch_bringup)
         btn_stop.clicked.connect(self.stop_bringup)
         btn_check.clicked.connect(self.check_services)
-        bringup_row.addWidget(QLabel("IP"))
-        bringup_row.addWidget(self.robot_ip)
-        bringup_row.addWidget(btn_launch)
-        bringup_row.addWidget(btn_stop)
-        bringup_row.addWidget(btn_check)
+        bringup_row.addWidget(QLabel("IP"), 0, 0)
+        bringup_row.addWidget(self.robot_ip, 0, 1, 1, 2)
+        bringup_row.addWidget(btn_launch, 1, 0)
+        bringup_row.addWidget(btn_stop, 1, 1)
+        bringup_row.addWidget(btn_check, 1, 2)
         state_layout.addLayout(bringup_row)
 
         state_row = QHBoxLayout()
@@ -431,7 +438,7 @@ class RobotControlWindow(QMainWindow):
         layout.addLayout(form)
         layout.addWidget(self.click_label)
 
-        row = QHBoxLayout()
+        row = QGridLayout()
         btn_start = QPushButton("Start Camera")
         btn_stop = QPushButton("Stop Camera")
         btn_reload = QPushButton("Reload Calib + Hand-Eye")
@@ -442,11 +449,11 @@ class RobotControlWindow(QMainWindow):
         btn_reload.clicked.connect(self.reload_camera_pick_calibration)
         btn_move.clicked.connect(self.move_to_clicked_target)
         btn_pick.clicked.connect(self.pick_clicked_target)
-        row.addWidget(btn_start)
-        row.addWidget(btn_stop)
-        row.addWidget(btn_reload)
-        row.addWidget(btn_move)
-        row.addWidget(btn_pick)
+        row.addWidget(btn_start, 0, 0)
+        row.addWidget(btn_stop, 0, 1)
+        row.addWidget(btn_reload, 0, 2)
+        row.addWidget(btn_move, 1, 0)
+        row.addWidget(btn_pick, 1, 1)
         layout.addLayout(row)
 
         return tab

@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QStatusBar,
@@ -189,6 +190,11 @@ class HandEyeWindow(QMainWindow):
             rv.addWidget(b)
         rv.addStretch(1)
 
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right)
+        right_scroll.setMinimumWidth(320)
+
         image_box = QWidget()
         grid = QGridLayout(image_box)
         grid.addWidget(self.left_panel, 0, 0)
@@ -196,7 +202,7 @@ class HandEyeWindow(QMainWindow):
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(image_box)
-        split.addWidget(right)
+        split.addWidget(right_scroll)
         split.setSizes([850, 330])
         self.setCentralWidget(split)
         self.setStatusBar(QStatusBar())
@@ -340,18 +346,18 @@ class HandEyeWindow(QMainWindow):
         box = QGroupBox("Robot Control")
         layout = QVBoxLayout(box)
 
-        bringup = QHBoxLayout()
+        bringup = QGridLayout()
         btn_launch = QPushButton("Launch Bringup")
         btn_stop = QPushButton("Stop Bringup")
         btn_check = QPushButton("Check Services")
         btn_launch.clicked.connect(self.launch_bringup)
         btn_stop.clicked.connect(self.stop_bringup)
         btn_check.clicked.connect(self.check_services)
-        bringup.addWidget(QLabel("IP"))
-        bringup.addWidget(self.robot_ip)
-        bringup.addWidget(btn_launch)
-        bringup.addWidget(btn_stop)
-        bringup.addWidget(btn_check)
+        bringup.addWidget(QLabel("IP"), 0, 0)
+        bringup.addWidget(self.robot_ip, 0, 1, 1, 2)
+        bringup.addWidget(btn_launch, 1, 0)
+        bringup.addWidget(btn_stop, 1, 1)
+        bringup.addWidget(btn_check, 1, 2)
         layout.addLayout(bringup)
 
         state = QHBoxLayout()
