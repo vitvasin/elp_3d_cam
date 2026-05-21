@@ -142,8 +142,11 @@ class HandEyeWindow(QMainWindow):
         self.seq_collect_idx = None
         self.seq_collect_pending = False
         self.bringup_proc = None
+        self.bringup_ready_checks_remaining = 0
 
         self.robot_ip = QLineEdit("192.168.1.6")
+        self.bringup_status = QLabel("Bringup: not started")
+        self.bringup_status.setWordWrap(True)
         self.manual_x = self._dspin(-1.0, 1.0, 0.300, 0.005)
         self.manual_y = self._dspin(-1.0, 1.0, 0.000, 0.005)
         self.manual_z = self._dspin(-0.500, 1.0, 0.150, 0.005)
@@ -359,6 +362,7 @@ class HandEyeWindow(QMainWindow):
         bringup.addWidget(btn_stop, 1, 1)
         bringup.addWidget(btn_check, 1, 2)
         layout.addLayout(bringup)
+        layout.addWidget(self.bringup_status)
 
         state = QHBoxLayout()
         btn_clear = QPushButton("Clear Error")
@@ -407,11 +411,14 @@ class HandEyeWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"Launch bringup failed: {exc}")
+            self.bringup_status.setText(f"Bringup: launch failed ({exc})")
             return
-        self.statusBar().showMessage("Started MG400 bringup.")
+        self.bringup_status.setText("Bringup: starting, waiting for MG400 services ...")
+        self.statusBar().showMessage("Started MG400 bringup; waiting for services.")
         if self.ros_node is None:
             QTimer.singleShot(3000, self.start_ros)
-        QTimer.singleShot(5000, self.check_services)
+        self.bringup_ready_checks_remaining = 25
+        QTimer.singleShot(1000, self.poll_bringup_ready)
 
     def stop_bringup(self, silent=False):
         if not self.bringup_proc or self.bringup_proc.poll() is not None:
@@ -423,12 +430,13 @@ class HandEyeWindow(QMainWindow):
             self.bringup_proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             self.bringup_proc.kill()
+        self.bringup_ready_checks_remaining = 0
+        self.bringup_status.setText("Bringup: stopped")
         self.statusBar().showMessage("Stopped MG400 bringup process.")
 
-    def check_services(self):
+    def mg400_service_status(self):
         if self.ros_node is None:
-            QMessageBox.warning(self, "ROS2", "ROS2 node is not running.")
-            return
+            return False, "ROS2 node is not running"
         names = sorted(name for name, _types in self.ros_node.get_service_names_and_types())
         needed = [
             "/mg400/clear_error",
@@ -436,7 +444,38 @@ class HandEyeWindow(QMainWindow):
             "/mg400/disable_robot",
             "/mg400/get_pose",
         ]
-        msg = "  ".join(f"{name}: {'OK' if name in names else 'MISSING'}" for name in needed)
+        missing = [name for name in needed if name not in names]
+        if not missing:
+            return True, "MG400 services ready"
+        return False, "Missing: " + ", ".join(missing)
+
+    def poll_bringup_ready(self):
+        if self.bringup_ready_checks_remaining <= 0:
+            return
+        if self.ros_node is None:
+            self.bringup_status.setText("Bringup: waiting for ROS2 node ...")
+            self.bringup_ready_checks_remaining -= 1
+            QTimer.singleShot(1000, self.poll_bringup_ready)
+            return
+        ready, msg = self.mg400_service_status()
+        if ready:
+            self.bringup_ready_checks_remaining = 0
+            self.bringup_status.setText("Bringup: ready")
+            self.statusBar().showMessage("MG400 bringup ready.")
+            return
+        self.bringup_status.setText(f"Bringup: waiting ({msg})")
+        self.bringup_ready_checks_remaining -= 1
+        if self.bringup_ready_checks_remaining > 0:
+            QTimer.singleShot(1000, self.poll_bringup_ready)
+        else:
+            self.statusBar().showMessage(f"MG400 bringup not ready: {msg}")
+
+    def check_services(self):
+        ready, msg = self.mg400_service_status()
+        if self.ros_node is None:
+            QMessageBox.warning(self, "ROS2", msg)
+            return
+        self.bringup_status.setText(f"Bringup: {'ready' if ready else msg}")
         self.statusBar().showMessage(msg)
 
     def robot_state_command(self, command):

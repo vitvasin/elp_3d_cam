@@ -122,11 +122,14 @@ class RobotControlWindow(QMainWindow):
         self.cam_depth_engine = None
         self.latest_depth = None
         self.clicked_robot = None
+        self.bringup_ready_checks_remaining = 0
 
         self.list = QListWidget()
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.robot_ip = QLineEdit("192.168.1.6")
+        self.bringup_status = QLabel("Bringup: not started")
+        self.bringup_status.setWordWrap(True)
 
         self.approach_z = self._spin(-0.500, 1.0, 0.150, 0.005)
         self.pick_z_offset = self._spin(-0.100, 0.100, 0.000, 0.001)
@@ -411,6 +414,7 @@ class RobotControlWindow(QMainWindow):
         bringup_row.addWidget(btn_stop, 1, 1)
         bringup_row.addWidget(btn_check, 1, 2)
         state_layout.addLayout(bringup_row)
+        state_layout.addWidget(self.bringup_status)
 
         state_row = QHBoxLayout()
         btn_clear = QPushButton("Clear Error")
@@ -693,12 +697,15 @@ class RobotControlWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"Launch bringup failed: {exc}")
+            self.bringup_status.setText(f"Bringup: launch failed ({exc})")
             return
+        self.bringup_status.setText("Bringup: starting, waiting for MG400 services ...")
         self.append_log("Started: " + " ".join(cmd))
         threading.Thread(target=self.drain_bringup_output, daemon=True).start()
         if self.node is None:
             QTimer.singleShot(3000, self.start_ros)
-        QTimer.singleShot(5000, self.check_services)
+        self.bringup_ready_checks_remaining = 25
+        QTimer.singleShot(1000, self.poll_bringup_ready)
 
     def drain_bringup_output(self):
         proc = self.bringup_proc
@@ -719,13 +726,54 @@ class RobotControlWindow(QMainWindow):
             self.bringup_proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             self.bringup_proc.kill()
+        self.bringup_ready_checks_remaining = 0
+        self.bringup_status.setText("Bringup: stopped")
         self.append_log("Stopped MG400 bringup process.")
 
-    def check_services(self):
+    def mg400_service_status(self):
         if self.node is None:
-            QMessageBox.warning(self, "ROS2", "ROS2 node is not running.")
-            return
+            return False, "ROS2 node is not running", []
         names = sorted(name for name, _types in self.node.get_service_names_and_types())
+        needed = [
+            "/mg400/clear_error",
+            "/mg400/enable_robot",
+            "/mg400/disable_robot",
+            "/mg400/get_pose",
+            "/mg400/do_execute",
+            "/mg400/tool_do_execute",
+        ]
+        missing = [name for name in needed if name not in names]
+        if not missing:
+            return True, "MG400 services ready", names
+        return False, "Missing: " + ", ".join(missing), names
+
+    def poll_bringup_ready(self):
+        if self.bringup_ready_checks_remaining <= 0:
+            return
+        if self.node is None:
+            self.bringup_status.setText("Bringup: waiting for ROS2 node ...")
+            self.bringup_ready_checks_remaining -= 1
+            QTimer.singleShot(1000, self.poll_bringup_ready)
+            return
+        ready, msg, _names = self.mg400_service_status()
+        if ready:
+            self.bringup_ready_checks_remaining = 0
+            self.bringup_status.setText("Bringup: ready")
+            self.append_log("MG400 bringup ready.")
+            return
+        self.bringup_status.setText(f"Bringup: waiting ({msg})")
+        self.bringup_ready_checks_remaining -= 1
+        if self.bringup_ready_checks_remaining > 0:
+            QTimer.singleShot(1000, self.poll_bringup_ready)
+        else:
+            self.append_log(f"MG400 bringup not ready: {msg}")
+
+    def check_services(self):
+        ready, msg, names = self.mg400_service_status()
+        if self.node is None:
+            QMessageBox.warning(self, "ROS2", msg)
+            return
+        self.bringup_status.setText(f"Bringup: {'ready' if ready else msg}")
         needed = [
             "/mg400/clear_error",
             "/mg400/enable_robot",
