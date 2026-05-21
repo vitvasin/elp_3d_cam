@@ -311,18 +311,22 @@ Calibration safety:
   block) and they auto-load on startup; `Uncover` runs `go_home` to the saved
   Manual-tab home pose. Stored keys: `x_offset_mm`, `y_offset_mm`,
   `z_offset_mm`, `r_deg`, `approach_z_mm`, `near_approach_z_mm`, `speed`,
-  `near_speed`, `accel`, `move_type` (legacy `z_offset_m` in meters still
-  read). `approach_z_mm` sets the pick hover clearance: hover Z is
+  `near_speed`, `accel`, `near_accel`, `move_type` (legacy `z_offset_m` in
+  meters still read). `approach_z_mm` sets the pick hover clearance: hover Z is
   `clicked target Z + approach_z_mm`, overriding the shared Pick-tab
   `approach_z`. The `Pick Clicked` descent is two-phase: pre-approach Z
-  (`approach_z_mm`) at `speed`, then near-approach Z (`near_approach_z_mm`)
-  and the final descent at the slower `near_speed`. `Pick Clicked` releases
-  the object at the approach point (`release_at_approach` param skips the place
-  move); the Pick/Auto tabs still move to their place point and stay
-  single-phase (`near_approach_z`/`near_speed` params absent). Camera Pick
-  moves use per-tab Speed/Near-speed/Accel ratios (1-100 %) and a MovJ/MovL
-  selector (config `move_type`); these flow through `move_cartesian_async`
-  into the MovJ/MovL action goal's `set_speed_*`/`set_acc_*` fields. The
+  (`approach_z_mm`) at `speed`/`accel`, then near-approach Z
+  (`near_approach_z_mm`) and the final descent at the slower
+  `near_speed`/`near_accel`. On short moves the robot is acceleration-limited
+  (never reaches cruise speed), so `near_accel` is the knob that visibly slows
+  the grasp; raise `near_approach_z_mm` to lengthen the slow segment.
+  `Pick Clicked` releases the object at the approach point
+  (`release_at_approach` param skips the place move); the Pick/Auto tabs still
+  move to their place point and stay single-phase (`near_approach_z`/
+  `near_speed`/`near_accel` params absent). Camera Pick moves use per-tab
+  Speed/Near-speed/Accel/Near-accel ratios (1-100 %) and a MovJ/MovL selector
+  (config `move_type`); these flow through `move_cartesian_async` into the
+  MovJ/MovL action goal's `set_speed_*`/`set_acc_*` fields. The
   checkable `Depth Heatmap` button toggles the live panel between
   rectified-left RGB and the colorized depth map (`result["color"]`).
 

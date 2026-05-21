@@ -174,6 +174,9 @@ class RobotControlWindow(QMainWindow):
         self.click_accel = QSpinBox()
         self.click_accel.setRange(1, 100)
         self.click_accel.setValue(50)
+        self.click_near_accel = QSpinBox()
+        self.click_near_accel.setRange(1, 100)
+        self.click_near_accel.setValue(20)
         self.click_move_type = QComboBox()
         self.click_move_type.addItems(["MovJ", "MovL"])
         self.click_x_offset.valueChanged.connect(self.update_clicked_robot_offset)
@@ -273,6 +276,7 @@ class RobotControlWindow(QMainWindow):
                 "speed": self.click_speed.value(),
                 "near_speed": self.click_near_speed.value(),
                 "accel": self.click_accel.value(),
+                "near_accel": self.click_near_accel.value(),
                 "move_type": self.click_move_type.currentText(),
             },
             "gripper": {
@@ -348,6 +352,9 @@ class RobotControlWindow(QMainWindow):
                 int(camera_pick.get("near_speed", self.click_near_speed.value()))
             )
             self.click_accel.setValue(int(camera_pick.get("accel", self.click_accel.value())))
+            self.click_near_accel.setValue(
+                int(camera_pick.get("near_accel", self.click_near_accel.value()))
+            )
             move_type = str(camera_pick.get("move_type", self.click_move_type.currentText()))
             mt_idx = self.click_move_type.findText(move_type)
             if mt_idx >= 0:
@@ -495,6 +502,7 @@ class RobotControlWindow(QMainWindow):
         form.addRow("Speed (%)", self.click_speed)
         form.addRow("Near-approach speed (%)", self.click_near_speed)
         form.addRow("Accel (%)", self.click_accel)
+        form.addRow("Near-approach accel (%)", self.click_near_accel)
         form.addRow("Move type", self.click_move_type)
         layout.addLayout(form)
         layout.addWidget(self.click_label)
@@ -670,7 +678,7 @@ class RobotControlWindow(QMainWindow):
             f"approachZ={self.click_approach_z.value():.1f}/"
             f"{self.click_near_approach_z.value():.1f} mm  "
             f"speed={self.click_speed.value()}/{self.click_near_speed.value()}% "
-            f"accel={self.click_accel.value()}% "
+            f"accel={self.click_accel.value()}/{self.click_near_accel.value()}% "
             f"{self.click_move_type.currentText()}"
         )
 
@@ -715,6 +723,7 @@ class RobotControlWindow(QMainWindow):
         params["accel"] = self.click_accel.value()
         params["near_approach_z"] = target[2] + self.click_near_approach_z.value() / 1000.0
         params["near_speed"] = self.click_near_speed.value()
+        params["near_accel"] = self.click_near_accel.value()
         threading.Thread(
             target=self.pick_sequence,
             args=(target, params),
@@ -1170,7 +1179,9 @@ class RobotControlWindow(QMainWindow):
         accel = params.get("accel")
         near_z = params.get("near_approach_z")
         near_speed = params.get("near_speed", speed)
+        near_accel = params.get("near_accel", accel)
         descend_speed = near_speed if near_z is not None else speed
+        descend_accel = near_accel if near_z is not None else accel
         try:
             self._log(f"Pick start ({px:.4f}, {py:.4f}, {pz:.4f})")
             if not self._set_do(use_tool, idx, open_state):
@@ -1178,9 +1189,11 @@ class RobotControlWindow(QMainWindow):
             if not self._move(px, py, approach_z, r, linear=linear, speed=speed, accel=accel):
                 return
             if near_z is not None:
-                if not self._move(px, py, near_z, r, linear=linear, speed=near_speed, accel=accel):
+                if not self._move(px, py, near_z, r, linear=linear,
+                                  speed=near_speed, accel=near_accel):
                     return
-            if not self._move(px, py, pz, r, linear=linear, speed=descend_speed, accel=accel):
+            if not self._move(px, py, pz, r, linear=linear,
+                              speed=descend_speed, accel=descend_accel):
                 return
             if not self._set_do(use_tool, idx, close_state):
                 return
@@ -1209,7 +1222,10 @@ class RobotControlWindow(QMainWindow):
             out["msg"] = msg
             evt.set()
 
-        self._log(f"{'MovL' if linear else 'MovJ'} ({x:.4f}, {y:.4f}, {z:.4f})")
+        self._log(
+            f"{'MovL' if linear else 'MovJ'} ({x:.4f}, {y:.4f}, {z:.4f}) "
+            f"s={speed} a={accel}"
+        )
         self.node.move_cartesian_async(
             x, y, z, r, is_linear=linear, on_done=done, speed=speed, accel=accel
         )
