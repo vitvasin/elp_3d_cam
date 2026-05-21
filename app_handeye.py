@@ -7,6 +7,7 @@ The result is saved to ``config/hand_eye.yaml`` and can update App 2's static TF
 """
 
 import sys
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -101,6 +102,7 @@ def finite_depth_near(depth_map, x, y, radius=6):
 
 class HandEyeWindow(QMainWindow):
     pose_received = pyqtSignal(object, object)
+    manual_pose_received = pyqtSignal(object, object)
     sequence_move_done = pyqtSignal(bool, str)
 
     def __init__(self, cfg):
@@ -134,6 +136,13 @@ class HandEyeWindow(QMainWindow):
         self.auto_seq_idx = 0
         self.auto_seq_collected = 0
         self.seq_waiting_for_marker = False
+        self.bringup_proc = None
+
+        self.robot_ip = QLineEdit("192.168.1.6")
+        self.manual_x = self._dspin(-1.0, 1.0, 0.300, 0.005)
+        self.manual_y = self._dspin(-1.0, 1.0, 0.000, 0.005)
+        self.manual_z = self._dspin(-0.500, 1.0, 0.150, 0.005)
+        self.manual_r = self._dspin(-180.0, 180.0, 0.0, 1.0)
 
         self.left_panel = ImagePanel("rectified left")
         self.depth_panel = ImagePanel("depth")
@@ -167,6 +176,7 @@ class HandEyeWindow(QMainWindow):
 
         right = QWidget()
         rv = QVBoxLayout(right)
+        rv.addWidget(self.build_robot_control_box())
         rv.addWidget(self.info)
         rv.addWidget(self.point_list, 1)
         rv.addWidget(controls)
@@ -188,6 +198,7 @@ class HandEyeWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
 
         self.pose_received.connect(self.on_pose_received)
+        self.manual_pose_received.connect(self.on_manual_pose_received)
         self.sequence_move_done.connect(self.on_sequence_move_done)
         self.start_ros()
         self.start_camera()
@@ -319,6 +330,149 @@ class HandEyeWindow(QMainWindow):
         s.setSingleStep(step)
         s.setValue(value)
         return s
+
+    def build_robot_control_box(self):
+        box = QGroupBox("Robot Control")
+        layout = QVBoxLayout(box)
+
+        bringup = QHBoxLayout()
+        btn_launch = QPushButton("Launch Bringup")
+        btn_stop = QPushButton("Stop Bringup")
+        btn_check = QPushButton("Check Services")
+        btn_launch.clicked.connect(self.launch_bringup)
+        btn_stop.clicked.connect(self.stop_bringup)
+        btn_check.clicked.connect(self.check_services)
+        bringup.addWidget(QLabel("IP"))
+        bringup.addWidget(self.robot_ip)
+        bringup.addWidget(btn_launch)
+        bringup.addWidget(btn_stop)
+        bringup.addWidget(btn_check)
+        layout.addLayout(bringup)
+
+        state = QHBoxLayout()
+        btn_clear = QPushButton("Clear Error")
+        btn_enable = QPushButton("Enable")
+        btn_disable = QPushButton("Disable")
+        btn_clear.clicked.connect(lambda: self.robot_state_command("clear"))
+        btn_enable.clicked.connect(lambda: self.robot_state_command("enable"))
+        btn_disable.clicked.connect(lambda: self.robot_state_command("disable"))
+        state.addWidget(btn_clear)
+        state.addWidget(btn_enable)
+        state.addWidget(btn_disable)
+        layout.addLayout(state)
+
+        form = QFormLayout()
+        form.addRow("X (m)", self.manual_x)
+        form.addRow("Y (m)", self.manual_y)
+        form.addRow("Z (m)", self.manual_z)
+        form.addRow("R yaw (deg)", self.manual_r)
+        layout.addLayout(form)
+
+        move = QHBoxLayout()
+        btn_read = QPushButton("Read Pose")
+        btn_movej = QPushButton("MoveJ")
+        btn_read.clicked.connect(self.read_manual_pose)
+        btn_movej.clicked.connect(self.manual_movej)
+        move.addWidget(btn_read)
+        move.addWidget(btn_movej)
+        layout.addLayout(move)
+        return box
+
+    def launch_bringup(self):
+        if self.bringup_proc and self.bringup_proc.poll() is None:
+            self.statusBar().showMessage("MG400 bringup already running from this app.")
+            return
+        ip = self.robot_ip.text().strip() or "192.168.1.6"
+        cmd = [
+            "ros2", "launch", "mg400_bringup", "mg400_gui.launch.py",
+            f"ip_address:={ip}",
+        ]
+        try:
+            self.bringup_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage(f"Launch bringup failed: {exc}")
+            return
+        self.statusBar().showMessage("Started MG400 bringup.")
+        if self.ros_node is None:
+            QTimer.singleShot(3000, self.start_ros)
+        QTimer.singleShot(5000, self.check_services)
+
+    def stop_bringup(self, silent=False):
+        if not self.bringup_proc or self.bringup_proc.poll() is not None:
+            if not silent:
+                self.statusBar().showMessage("No bringup process started by this app.")
+            return
+        self.bringup_proc.terminate()
+        try:
+            self.bringup_proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self.bringup_proc.kill()
+        self.statusBar().showMessage("Stopped MG400 bringup process.")
+
+    def check_services(self):
+        if self.ros_node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2 node is not running.")
+            return
+        names = sorted(name for name, _types in self.ros_node.get_service_names_and_types())
+        needed = [
+            "/mg400/clear_error",
+            "/mg400/enable_robot",
+            "/mg400/disable_robot",
+            "/mg400/get_pose",
+        ]
+        msg = "  ".join(f"{name}: {'OK' if name in names else 'MISSING'}" for name in needed)
+        self.statusBar().showMessage(msg)
+
+    def robot_state_command(self, command):
+        if self.ros_node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+
+        def done(ok, msg):
+            self.statusBar().showMessage(f"{command}: {'ok' if ok else msg}")
+
+        if command == "clear":
+            self.ros_node.clear_error_async(done)
+        elif command == "enable":
+            self.ros_node.enable_robot_async(done)
+        elif command == "disable":
+            self.ros_node.disable_robot_async(done)
+
+    def read_manual_pose(self):
+        if self.ros_node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+        self.ros_node.request_pose_async(
+            lambda pose, err: self.manual_pose_received.emit(pose, err)
+        )
+
+    def on_manual_pose_received(self, pose, err):
+        if pose is None:
+            self.statusBar().showMessage(f"Read pose failed: {err}")
+            return
+        x, y, z = pose
+        self.manual_x.setValue(float(x))
+        self.manual_y.setValue(float(y))
+        self.manual_z.setValue(float(z))
+        self.statusBar().showMessage(f"Pose read ({x:.4f}, {y:.4f}, {z:.4f})")
+
+    def manual_movej(self):
+        if self.ros_node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+        self.ros_node.move_cartesian_async(
+            self.manual_x.value(),
+            self.manual_y.value(),
+            self.manual_z.value(),
+            self.manual_r.value(),
+            is_linear=False,
+            on_done=lambda ok, msg: self.statusBar().showMessage(f"MoveJ: {'ok' if ok else msg}"),
+        )
 
     def start_ros(self):
         if not ROS_OK:
@@ -815,6 +969,7 @@ class HandEyeWindow(QMainWindow):
         self.sequence_move_next()
 
     def closeEvent(self, event):
+        self.stop_bringup(silent=True)
         if self.capture:
             self.capture.stop()
         if self.depth_worker:

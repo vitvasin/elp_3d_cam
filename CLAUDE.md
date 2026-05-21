@@ -35,6 +35,8 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
    stable ArUco observations.
 5. Solves `p_robot = R @ p_camera + t` and saves `config/hand_eye.yaml`.
 6. `app_detect.py` auto-loads this file and applies it to ROS2 static TF.
+7. Includes a Robot Control panel for MG400 bringup, clear/enable/disable,
+   pose readback, and basic MoveJ during calibration setup.
 
 **App 4 — `app_robot_control.py` (MG400 pick controller)**
 1. Subscribes to `/elp/detections`.
