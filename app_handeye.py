@@ -105,6 +105,7 @@ class HandEyeWindow(QMainWindow):
     pose_received = pyqtSignal(object, object)
     manual_pose_received = pyqtSignal(object, object)
     sequence_move_done = pyqtSignal(bool, str)
+    sequence_pose_received = pyqtSignal(object, object)
 
     def __init__(self, cfg):
         super().__init__()
@@ -137,6 +138,8 @@ class HandEyeWindow(QMainWindow):
         self.auto_seq_idx = 0
         self.auto_seq_collected = 0
         self.seq_waiting_for_marker = False
+        self.seq_collect_idx = None
+        self.seq_collect_pending = False
         self.bringup_proc = None
 
         self.robot_ip = QLineEdit("192.168.1.6")
@@ -201,6 +204,7 @@ class HandEyeWindow(QMainWindow):
         self.pose_received.connect(self.on_pose_received)
         self.manual_pose_received.connect(self.on_manual_pose_received)
         self.sequence_move_done.connect(self.on_sequence_move_done)
+        self.sequence_pose_received.connect(self.on_sequence_pose_received)
         self.start_ros()
         self.start_camera()
         self.try_load_calibration()
@@ -710,18 +714,39 @@ class HandEyeWindow(QMainWindow):
             and not self.marker_collecting
             and (not self.auto_seq_running or self.seq_waiting_for_marker)
         ):
+            if self.auto_seq_running:
+                self.seq_waiting_for_marker = False
+                self.seq_collect_idx = self.auto_seq_idx
+                self.seq_collect_pending = True
+                self.seq_status.setText(
+                    f"Collecting {self.auto_seq_idx + 1}/{len(self.auto_seq_positions)} ..."
+                )
             self.marker_collecting = True
             QTimer.singleShot(0, self.collect_aruco_marker)
+
+    def _auto_collect_retry(self, msg):
+        self.marker_collecting = False
+        self.seq_collect_pending = False
+        self.seq_collect_idx = None
+        if self.auto_seq_running:
+            self.seq_waiting_for_marker = True
+            self.seq_status.setText(msg)
+            return True
+        return False
 
     def collect_aruco_marker(self):
         if self.marker_collecting and not self.aruco_auto_collect.isChecked():
             return
         if self.marker_centroid is None:
+            if self._auto_collect_retry("No marker detected; waiting for stable ArUco."):
+                return
             QMessageBox.warning(self, "ArUco", "No target marker detected.")
             self.marker_collecting = False
             return
         if self.aruco_use_pnp.isChecked():
             if self.marker_tvec is None:
+                if self._auto_collect_retry("PnP pose unavailable; waiting for stable ArUco."):
+                    return
                 QMessageBox.warning(self, "ArUco", "PnP is enabled but marker pose is unavailable.")
                 self.marker_collecting = False
                 return
@@ -729,12 +754,16 @@ class HandEyeWindow(QMainWindow):
             return
 
         if self.calib is None or self.latest_depth is None:
+            if self._auto_collect_retry("Need stereo calibration and depth frame; waiting."):
+                return
             QMessageBox.warning(self, "ArUco", "Need stereo calibration and depth frame.")
             self.marker_collecting = False
             return
         cx, cy = self.marker_centroid
         z, sample = finite_depth_near(self.latest_depth, int(round(cx)), int(round(cy)), radius=10)
         if z is None:
+            if self._auto_collect_retry("No finite depth near marker; waiting for stable depth."):
+                return
             QMessageBox.warning(self, "ArUco", "No finite depth near marker centroid.")
             self.marker_collecting = False
             return
@@ -766,14 +795,32 @@ class HandEyeWindow(QMainWindow):
             QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
             return
         self.statusBar().showMessage("Reading /mg400/get_pose ...")
+        seq_idx = self.seq_collect_idx if self.auto_seq_running else None
         self.ros_node.request_pose_async(
-            lambda pose, err: self.pose_received.emit((tuple(cam_m), source), (pose, err))
+            lambda pose, err, seq_idx=seq_idx: self.pose_received.emit(
+                (tuple(cam_m), source, seq_idx), (pose, err)
+            )
         )
 
     def on_pose_received(self, cam_payload, pose_payload):
-        cam_m, source = cam_payload
+        if len(cam_payload) == 3:
+            cam_m, source, seq_idx = cam_payload
+        else:
+            cam_m, source = cam_payload
+            seq_idx = None
         pose, err = pose_payload
         self.marker_collecting = False
+        if self.auto_seq_running:
+            self.seq_collect_pending = False
+            self.seq_waiting_for_marker = False
+            if seq_idx != self.auto_seq_idx:
+                self.seq_collect_idx = None
+                self.statusBar().showMessage(
+                    f"Ignored stale pose callback for sequence point {seq_idx}; "
+                    f"current is {self.auto_seq_idx}."
+                )
+                return
+            self.seq_collect_idx = None
         if pose is None:
             self.statusBar().showMessage(f"Pose read failed: {err}")
             if self.auto_seq_running:
@@ -845,15 +892,19 @@ class HandEyeWindow(QMainWindow):
         if self.ros_node is None:
             QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
             return
+        self.seq_status.setText("Reading current robot pose ...")
+        self.ros_node.request_pose_async(
+            lambda pose, err: self.sequence_pose_received.emit(pose, err)
+        )
 
-        def _done(pose, err):
-            if pose is None:
-                self.sequence_move_done.emit(False, f"pose read failed: {err}")
-                return
-            x, y, z = pose
-            QTimer.singleShot(0, lambda: self.set_sequence_center(x, y, z))
-
-        self.ros_node.request_pose_async(_done)
+    def on_sequence_pose_received(self, pose, err):
+        if pose is None:
+            msg = f"Current pose read failed: {err}"
+            self.seq_status.setText(msg)
+            self.statusBar().showMessage(msg)
+            return
+        x, y, z = pose
+        self.set_sequence_center(x, y, z)
 
     def set_sequence_center(self, x, y, z):
         self.seq_cx.setValue(float(x))
@@ -897,6 +948,8 @@ class HandEyeWindow(QMainWindow):
         self.auto_seq_collected = 0
         self.auto_seq_running = True
         self.seq_waiting_for_marker = False
+        self.seq_collect_idx = None
+        self.seq_collect_pending = False
         self.seq_start_btn.setEnabled(False)
         self.seq_stop_btn.setEnabled(True)
         self.sequence_move_next()
@@ -904,6 +957,9 @@ class HandEyeWindow(QMainWindow):
     def sequence_stop(self):
         self.auto_seq_running = False
         self.seq_waiting_for_marker = False
+        self.seq_collect_idx = None
+        self.seq_collect_pending = False
+        self.marker_collecting = False
         self.aruco_auto_collect.setChecked(False)
         self.seq_start_btn.setEnabled(True)
         self.seq_stop_btn.setEnabled(False)
@@ -918,6 +974,9 @@ class HandEyeWindow(QMainWindow):
         if self.auto_seq_idx >= len(self.auto_seq_positions):
             self.auto_seq_running = False
             self.seq_waiting_for_marker = False
+            self.seq_collect_idx = None
+            self.seq_collect_pending = False
+            self.marker_collecting = False
             self.aruco_auto_collect.setChecked(False)
             self.seq_start_btn.setEnabled(True)
             self.seq_stop_btn.setEnabled(False)
@@ -931,6 +990,8 @@ class HandEyeWindow(QMainWindow):
         self.marker_centroid = None
         self.marker_collecting = False
         self.seq_waiting_for_marker = False
+        self.seq_collect_idx = None
+        self.seq_collect_pending = False
         self.seq_status.setText(
             f"Moving {self.auto_seq_idx + 1}/{n}: ({x:.4f}, {y:.4f}, {z:.4f}) m"
         )
@@ -959,6 +1020,8 @@ class HandEyeWindow(QMainWindow):
         self.marker_centroid = None
         self.marker_collecting = False
         self.seq_waiting_for_marker = True
+        self.seq_collect_idx = None
+        self.seq_collect_pending = False
         self.seq_status.setText(
             f"At {self.auto_seq_idx + 1}/{len(self.auto_seq_positions)}; hold marker stable."
         )

@@ -91,7 +91,9 @@ Override the device in `config/default.yaml` if needed.
    `config/hand_eye.yaml`. The hand-eye app also supports ArUco collection
    using stereo depth or marker-size PnP, plus an auto-calibration sequence that
    moves the robot through a configurable grid and auto-collects stable ArUco
-   observations. Its right-side Robot Control panel can launch/stop MG400
+   observations. *Use Current Pose* reads the live robot pose into the sequence
+   center, and auto-collection accepts only one ArUco observation per grid pose.
+   Its right-side Robot Control panel can launch/stop MG400
    bringup, clear/enable/disable the robot, read pose, and send a basic MoveJ.
 5. **Runtime pick flow** — `app_detect.py` auto-loads `config/hand_eye.yaml`
    and publishes detections in `robot_base` when ROS2 is enabled. Then run

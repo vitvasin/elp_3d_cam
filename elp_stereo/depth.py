@@ -228,8 +228,11 @@ class DepthEngine:
             self._depth_buffer.append(depth)
             if len(self._depth_buffer) >= 2:
                 stack = np.stack(self._depth_buffer, axis=0)
-                with np.errstate(invalid="ignore"):
-                    depth = np.nanmean(stack, axis=0).astype(np.float32)
+                valid = np.isfinite(stack)
+                counts = valid.sum(axis=0)
+                summed = np.where(valid, stack, 0.0).sum(axis=0, dtype=np.float32)
+                depth = np.full(stack.shape[1:], np.nan, dtype=np.float32)
+                np.divide(summed, counts, out=depth, where=counts > 0)
 
         self.depth_map = depth
         return depth
