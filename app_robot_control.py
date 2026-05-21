@@ -141,7 +141,7 @@ class RobotControlWindow(QMainWindow):
         self.do_index.setRange(1, 16)
         self.do_index.setValue(1)
         self.do_type = QComboBox()
-        self.do_type.addItems(["Tool DO", "Base DO"])
+        self.do_type.addItems(["Base DO", "Tool DO"])
         self.close_high = QCheckBox("HIGH closes gripper")
         self.close_high.setChecked(True)
         self.auto_pick = QCheckBox("Auto pick first detection")
@@ -159,7 +159,25 @@ class RobotControlWindow(QMainWindow):
         self.place_list.currentRowChanged.connect(self.on_place_selected)
         self.place_index_label = QLabel("Next place: 0")
         self.home_label = QLabel("Home: not set")
-        self.click_z_offset = self._spin(-0.300, 0.300, 0.000, 0.001)
+        self.click_x_offset = self._spin(-300.0, 300.0, 0.0, 1.0, decimals=1)
+        self.click_y_offset = self._spin(-300.0, 300.0, 0.0, 1.0, decimals=1)
+        self.click_z_offset = self._spin(-300.0, 300.0, 0.0, 1.0, decimals=1)
+        self.click_r = self._spin(-180.0, 180.0, 40.0, 1.0, decimals=1)
+        self.click_approach_z = self._spin(0.0, 500.0, 100.0, 1.0, decimals=1)
+        self.click_near_approach_z = self._spin(0.0, 500.0, 30.0, 1.0, decimals=1)
+        self.click_speed = QSpinBox()
+        self.click_speed.setRange(1, 100)
+        self.click_speed.setValue(50)
+        self.click_near_speed = QSpinBox()
+        self.click_near_speed.setRange(1, 100)
+        self.click_near_speed.setValue(20)
+        self.click_accel = QSpinBox()
+        self.click_accel.setRange(1, 100)
+        self.click_accel.setValue(50)
+        self.click_move_type = QComboBox()
+        self.click_move_type.addItems(["MovJ", "MovL"])
+        self.click_x_offset.valueChanged.connect(self.update_clicked_robot_offset)
+        self.click_y_offset.valueChanged.connect(self.update_clicked_robot_offset)
         self.click_z_offset.valueChanged.connect(self.update_clicked_robot_offset)
         self.click_label = QLabel("Clicked target: -")
 
@@ -224,10 +242,10 @@ class RobotControlWindow(QMainWindow):
         area.setWidget(widget)
         return area
 
-    def _spin(self, lo, hi, value, step):
+    def _spin(self, lo, hi, value, step, decimals=4):
         s = QDoubleSpinBox()
         s.setRange(lo, hi)
-        s.setDecimals(4)
+        s.setDecimals(decimals)
         s.setSingleStep(step)
         s.setValue(value)
         return s
@@ -246,7 +264,16 @@ class RobotControlWindow(QMainWindow):
                 "jog_step_m": self.jog_step.value(),
             },
             "camera_pick": {
-                "z_offset_m": self.click_z_offset.value(),
+                "x_offset_mm": self.click_x_offset.value(),
+                "y_offset_mm": self.click_y_offset.value(),
+                "z_offset_mm": self.click_z_offset.value(),
+                "r_deg": self.click_r.value(),
+                "approach_z_mm": self.click_approach_z.value(),
+                "near_approach_z_mm": self.click_near_approach_z.value(),
+                "speed": self.click_speed.value(),
+                "near_speed": self.click_near_speed.value(),
+                "accel": self.click_accel.value(),
+                "move_type": self.click_move_type.currentText(),
             },
             "gripper": {
                 "do_type": self.do_type.currentText(),
@@ -303,7 +330,28 @@ class RobotControlWindow(QMainWindow):
 
         camera_pick = data.get("camera_pick", {})
         if isinstance(camera_pick, dict):
-            self.click_z_offset.setValue(float(camera_pick.get("z_offset_m", self.click_z_offset.value())))
+            self.click_x_offset.setValue(float(camera_pick.get("x_offset_mm", self.click_x_offset.value())))
+            self.click_y_offset.setValue(float(camera_pick.get("y_offset_mm", self.click_y_offset.value())))
+            if "z_offset_mm" in camera_pick:
+                self.click_z_offset.setValue(float(camera_pick["z_offset_mm"]))
+            elif "z_offset_m" in camera_pick:
+                self.click_z_offset.setValue(float(camera_pick["z_offset_m"]) * 1000.0)
+            self.click_r.setValue(float(camera_pick.get("r_deg", self.click_r.value())))
+            self.click_approach_z.setValue(
+                float(camera_pick.get("approach_z_mm", self.click_approach_z.value()))
+            )
+            self.click_near_approach_z.setValue(
+                float(camera_pick.get("near_approach_z_mm", self.click_near_approach_z.value()))
+            )
+            self.click_speed.setValue(int(camera_pick.get("speed", self.click_speed.value())))
+            self.click_near_speed.setValue(
+                int(camera_pick.get("near_speed", self.click_near_speed.value()))
+            )
+            self.click_accel.setValue(int(camera_pick.get("accel", self.click_accel.value())))
+            move_type = str(camera_pick.get("move_type", self.click_move_type.currentText()))
+            mt_idx = self.click_move_type.findText(move_type)
+            if mt_idx >= 0:
+                self.click_move_type.setCurrentIndex(mt_idx)
 
         gripper = data.get("gripper", {})
         if isinstance(gripper, dict):
@@ -438,7 +486,16 @@ class RobotControlWindow(QMainWindow):
         layout.addWidget(self.pick_image, 1)
 
         form = QFormLayout()
-        form.addRow("Robot Z offset (m)", self.click_z_offset)
+        form.addRow("Robot X offset (mm)", self.click_x_offset)
+        form.addRow("Robot Y offset (mm)", self.click_y_offset)
+        form.addRow("Robot Z offset (mm)", self.click_z_offset)
+        form.addRow("R yaw (deg)", self.click_r)
+        form.addRow("Pre-approach Z above target (mm)", self.click_approach_z)
+        form.addRow("Near-approach Z above target (mm)", self.click_near_approach_z)
+        form.addRow("Speed (%)", self.click_speed)
+        form.addRow("Near-approach speed (%)", self.click_near_speed)
+        form.addRow("Accel (%)", self.click_accel)
+        form.addRow("Move type", self.click_move_type)
         layout.addLayout(form)
         layout.addWidget(self.click_label)
 
@@ -448,16 +505,25 @@ class RobotControlWindow(QMainWindow):
         btn_reload = QPushButton("Reload Calib + Hand-Eye")
         btn_move = QPushButton("Move To Click")
         btn_pick = QPushButton("Pick Clicked")
+        btn_uncover = QPushButton("Uncover")
+        btn_save_offset = QPushButton("Save Offset")
+        self.btn_heatmap = QPushButton("Depth Heatmap")
+        self.btn_heatmap.setCheckable(True)
         btn_start.clicked.connect(self.start_camera_pick)
         btn_stop.clicked.connect(self.stop_camera_pick)
         btn_reload.clicked.connect(self.reload_camera_pick_calibration)
         btn_move.clicked.connect(self.move_to_clicked_target)
         btn_pick.clicked.connect(self.pick_clicked_target)
+        btn_uncover.clicked.connect(self.go_home)
+        btn_save_offset.clicked.connect(self.save_camera_pick_offset)
         row.addWidget(btn_start, 0, 0)
         row.addWidget(btn_stop, 0, 1)
         row.addWidget(btn_reload, 0, 2)
         row.addWidget(btn_move, 1, 0)
         row.addWidget(btn_pick, 1, 1)
+        row.addWidget(btn_uncover, 1, 2)
+        row.addWidget(btn_save_offset, 2, 0, 1, 2)
+        row.addWidget(self.btn_heatmap, 2, 2)
         layout.addLayout(row)
 
         return tab
@@ -533,13 +599,16 @@ class RobotControlWindow(QMainWindow):
             self.append_log(f"Camera pick depth error: {result['error']}")
             return
         self.latest_depth = result["depth_map"]
-        left = result["left"].copy()
+        if self.btn_heatmap.isChecked() and result.get("color") is not None:
+            display = result["color"].copy()
+        else:
+            display = result["left"].copy()
         if self.clicked_robot is not None:
             xy = self.clicked_robot.get("uv")
             if xy is not None:
                 import cv2
-                cv2.drawMarker(left, tuple(xy), (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
-        self.pick_image.show_image(left)
+                cv2.drawMarker(display, tuple(xy), (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
+        self.pick_image.show_image(display)
 
     def on_camera_pick_click(self, x, y):
         if self.cam_calib is None or self.cam_depth_engine is None or self.latest_depth is None:
@@ -574,7 +643,10 @@ class RobotControlWindow(QMainWindow):
         if self.clicked_robot is None or "robot_base_m" not in self.clicked_robot:
             return
         bx, by, bz = self.clicked_robot["robot_base_m"]
-        robot_xyz = (float(bx), float(by), float(bz) + self.click_z_offset.value())
+        ox = self.click_x_offset.value() / 1000.0
+        oy = self.click_y_offset.value() / 1000.0
+        oz = self.click_z_offset.value() / 1000.0
+        robot_xyz = (float(bx) + ox, float(by) + oy, float(bz) + oz)
         self.clicked_robot["robot_m"] = robot_xyz
         uv = self.clicked_robot.get("uv", ("-", "-"))
         depth = self.clicked_robot.get("depth_mm", float("nan"))
@@ -582,8 +654,24 @@ class RobotControlWindow(QMainWindow):
         self.click_label.setText(
             "Clicked target: "
             f"uv=({uv[0]},{uv[1]}) depth={depth:.1f} +/-{std:.1f} mm  "
-            f"baseZ={bz:+.4f} offset={self.click_z_offset.value():+.4f}  "
+            f"offset=({self.click_x_offset.value():+.1f}, {self.click_y_offset.value():+.1f}, "
+            f"{self.click_z_offset.value():+.1f}) mm  "
             f"robot=({robot_xyz[0]:+.4f}, {robot_xyz[1]:+.4f}, {robot_xyz[2]:+.4f}) m"
+        )
+
+    def save_camera_pick_offset(self):
+        self.save_robot_config()
+        self.append_log(
+            f"Saved camera-pick offset: "
+            f"X={self.click_x_offset.value():+.1f} "
+            f"Y={self.click_y_offset.value():+.1f} "
+            f"Z={self.click_z_offset.value():+.1f} mm  "
+            f"R={self.click_r.value():+.1f} deg  "
+            f"approachZ={self.click_approach_z.value():.1f}/"
+            f"{self.click_near_approach_z.value():.1f} mm  "
+            f"speed={self.click_speed.value()}/{self.click_near_speed.value()}% "
+            f"accel={self.click_accel.value()}% "
+            f"{self.click_move_type.currentText()}"
         )
 
     def move_to_clicked_target(self):
@@ -596,8 +684,15 @@ class RobotControlWindow(QMainWindow):
         if self.busy:
             return
         x, y, z = self.clicked_robot["robot_m"]
-        r = self.r_deg.value()
-        threading.Thread(target=self.manual_move_sequence, args=(x, y, z, r, False), daemon=True).start()
+        r = self.click_r.value()
+        linear = self.click_move_type.currentText() == "MovL"
+        speed = self.click_speed.value()
+        accel = self.click_accel.value()
+        threading.Thread(
+            target=self.manual_move_sequence,
+            args=(x, y, z, r, linear, speed, accel),
+            daemon=True,
+        ).start()
 
     def pick_clicked_target(self):
         if self.node is None:
@@ -611,9 +706,18 @@ class RobotControlWindow(QMainWindow):
         params = self.pick_params(use_place_list=False)
         if params is None:
             return
+        params["r"] = self.click_r.value()
+        target = self.clicked_robot["robot_m"]
+        params["approach_z"] = target[2] + self.click_approach_z.value() / 1000.0
+        params["release_at_approach"] = True
+        params["linear"] = self.click_move_type.currentText() == "MovL"
+        params["speed"] = self.click_speed.value()
+        params["accel"] = self.click_accel.value()
+        params["near_approach_z"] = target[2] + self.click_near_approach_z.value() / 1000.0
+        params["near_speed"] = self.click_near_speed.value()
         threading.Thread(
             target=self.pick_sequence,
-            args=(self.clicked_robot["robot_m"], params),
+            args=(target, params),
             daemon=True,
         ).start()
 
@@ -863,10 +967,10 @@ class RobotControlWindow(QMainWindow):
         r = self.manual_r.value()
         threading.Thread(target=self.manual_move_sequence, args=(x, y, z, r, linear), daemon=True).start()
 
-    def manual_move_sequence(self, x, y, z, r, linear):
+    def manual_move_sequence(self, x, y, z, r, linear, speed=None, accel=None):
         self.busy = True
         try:
-            self._move(x, y, z, r, linear=linear)
+            self._move(x, y, z, r, linear=linear, speed=speed, accel=accel)
         finally:
             self.busy = False
 
@@ -910,8 +1014,8 @@ class RobotControlWindow(QMainWindow):
         if self.node is None:
             QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
             return
-        close_state = 1 if self.close_high.isChecked() else 0
-        state = (0 if close_state == 1 else 1) if open_gripper else close_state
+        # DO polarity hard-inverted: open = HIGH(1), close = LOW(0).
+        state = 1 if open_gripper else 0
         use_tool = self.do_type.currentText() == "Tool DO"
         idx = self.do_index.value()
         threading.Thread(target=self._set_do, args=(use_tool, idx, state), daemon=True).start()
@@ -1037,7 +1141,7 @@ class RobotControlWindow(QMainWindow):
         else:
             place = (self.place_x.value(), self.place_y.value(), self.place_z.value())
 
-        close_state = 1 if self.close_high.isChecked() else 0
+        # DO polarity hard-inverted: open = HIGH(1), close = LOW(0).
         return {
             "approach_z": self.approach_z.value(),
             "pick_z_offset": self.pick_z_offset.value(),
@@ -1046,8 +1150,8 @@ class RobotControlWindow(QMainWindow):
             "r": self.r_deg.value(),
             "use_tool": self.do_type.currentText() == "Tool DO",
             "idx": self.do_index.value(),
-            "close_state": close_state,
-            "open_state": 0 if close_state == 1 else 1,
+            "close_state": 0,
+            "open_state": 1,
         }
 
     def pick_sequence(self, pick, params):
@@ -1061,21 +1165,32 @@ class RobotControlWindow(QMainWindow):
         idx = params["idx"]
         close_state = params["close_state"]
         open_state = params["open_state"]
+        linear = params.get("linear", False)
+        speed = params.get("speed")
+        accel = params.get("accel")
+        near_z = params.get("near_approach_z")
+        near_speed = params.get("near_speed", speed)
+        descend_speed = near_speed if near_z is not None else speed
         try:
             self._log(f"Pick start ({px:.4f}, {py:.4f}, {pz:.4f})")
             if not self._set_do(use_tool, idx, open_state):
                 return
-            if not self._move(px, py, approach_z, r):
+            if not self._move(px, py, approach_z, r, linear=linear, speed=speed, accel=accel):
                 return
-            if not self._move(px, py, pz, r):
+            if near_z is not None:
+                if not self._move(px, py, near_z, r, linear=linear, speed=near_speed, accel=accel):
+                    return
+            if not self._move(px, py, pz, r, linear=linear, speed=descend_speed, accel=accel):
                 return
             if not self._set_do(use_tool, idx, close_state):
                 return
             time.sleep(0.2)
-            if not self._move(px, py, approach_z, r):
+            if not self._move(px, py, approach_z, r, linear=linear, speed=speed, accel=accel):
                 return
-            if not self._move(place[0], place[1], place[2], r):
-                return
+            if not params.get("release_at_approach"):
+                if not self._move(place[0], place[1], place[2], r,
+                                  linear=linear, speed=speed, accel=accel):
+                    return
             self._set_do(use_tool, idx, open_state)
             self._log("Pick/place complete")
             if params["place_i"] is not None:
@@ -1085,7 +1200,7 @@ class RobotControlWindow(QMainWindow):
         finally:
             self.busy = False
 
-    def _move(self, x, y, z, r, linear=False):
+    def _move(self, x, y, z, r, linear=False, speed=None, accel=None):
         evt = threading.Event()
         out = {"ok": False, "msg": "timeout"}
 
@@ -1095,7 +1210,9 @@ class RobotControlWindow(QMainWindow):
             evt.set()
 
         self._log(f"{'MovL' if linear else 'MovJ'} ({x:.4f}, {y:.4f}, {z:.4f})")
-        self.node.move_cartesian_async(x, y, z, r, is_linear=linear, on_done=done)
+        self.node.move_cartesian_async(
+            x, y, z, r, is_linear=linear, on_done=done, speed=speed, accel=accel
+        )
         evt.wait(timeout=30.0)
         if not out["ok"]:
             self._log(f"Move failed: {out['msg']}")

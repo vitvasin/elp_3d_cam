@@ -92,8 +92,13 @@ class MG400Node(Node):
 
         future.add_done_callback(_on_done)
 
-    def move_cartesian_async(self, x, y, z, r_deg, is_linear=False, on_done=None):
-        """Send a Cartesian move goal. Coordinates are meters, R is yaw degrees."""
+    def move_cartesian_async(self, x, y, z, r_deg, is_linear=False, on_done=None,
+                             speed=None, accel=None):
+        """Send a Cartesian move goal. Coordinates are meters, R is yaw degrees.
+
+        ``speed`` / ``accel`` are optional uint8 ratios (1-100); ``None`` leaves
+        the robot's current setting unchanged.
+        """
         client = self.act_mov_l if is_linear else self.act_mov_j
         action = MovL if is_linear else MovJ
         if not client.wait_for_server(timeout_sec=2.0):
@@ -110,6 +115,22 @@ class MG400Node(Node):
         goal.pose.pose.position.z = float(z)
         goal.pose.pose.orientation.z = math.sin(r_rad / 2.0)
         goal.pose.pose.orientation.w = math.cos(r_rad / 2.0)
+        if speed is not None:
+            ratio = max(1, min(100, int(speed)))
+            if is_linear:
+                goal.set_speed_l = True
+                goal.speed_l = ratio
+            else:
+                goal.set_speed_j = True
+                goal.speed_j = ratio
+        if accel is not None:
+            ratio = max(1, min(100, int(accel)))
+            if is_linear:
+                goal.set_acc_l = True
+                goal.acc_l = ratio
+            else:
+                goal.set_acc_j = True
+                goal.acc_j = ratio
 
         def _goal_resp(fut):
             try:

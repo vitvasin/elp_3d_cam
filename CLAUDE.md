@@ -305,8 +305,26 @@ Calibration safety:
 - App 4 Camera Pick tab uses `load_config()` plus the calibration output path,
   starts its own `CaptureThread` + `DepthWorker`, back-projects clicked
   rectified-left pixels with `P1`, transforms camera meters through
-  `config/hand_eye.yaml`, then applies a configurable robot Z offset before
-  MoveJ or the existing pick sequence.
+  `config/hand_eye.yaml`, then applies configurable robot X/Y/Z offsets (mm)
+  and an R yaw (deg, default 40.0) before MoveJ or the existing pick sequence.
+  `Save Offset` writes these to `config/robot_control.yaml` (`camera_pick`
+  block) and they auto-load on startup; `Uncover` runs `go_home` to the saved
+  Manual-tab home pose. Stored keys: `x_offset_mm`, `y_offset_mm`,
+  `z_offset_mm`, `r_deg`, `approach_z_mm`, `near_approach_z_mm`, `speed`,
+  `near_speed`, `accel`, `move_type` (legacy `z_offset_m` in meters still
+  read). `approach_z_mm` sets the pick hover clearance: hover Z is
+  `clicked target Z + approach_z_mm`, overriding the shared Pick-tab
+  `approach_z`. The `Pick Clicked` descent is two-phase: pre-approach Z
+  (`approach_z_mm`) at `speed`, then near-approach Z (`near_approach_z_mm`)
+  and the final descent at the slower `near_speed`. `Pick Clicked` releases
+  the object at the approach point (`release_at_approach` param skips the place
+  move); the Pick/Auto tabs still move to their place point and stay
+  single-phase (`near_approach_z`/`near_speed` params absent). Camera Pick
+  moves use per-tab Speed/Near-speed/Accel ratios (1-100 %) and a MovJ/MovL
+  selector (config `move_type`); these flow through `move_cartesian_async`
+  into the MovJ/MovL action goal's `set_speed_*`/`set_acc_*` fields. The
+  checkable `Depth Heatmap` button toggles the live panel between
+  rectified-left RGB and the colorized depth map (`result["color"]`).
 
 Alias setup:
 ```bash
