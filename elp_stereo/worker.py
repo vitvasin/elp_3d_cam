@@ -76,9 +76,3 @@ class DepthWorker(QThread):
         with self._lock:
             self._pending = None
         self.wait(2000)
-
-    def request_stop(self):
-        """Ask the worker to stop without blocking the caller."""
-        self._stop = True
-        with self._lock:
-            self._pending = None

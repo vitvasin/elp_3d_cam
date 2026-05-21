@@ -119,7 +119,6 @@ class HandEyeWindow(QMainWindow):
         self.depth_engine = None
         self.capture = None
         self.depth_worker = None
-        self.stopping_depth_workers = []
         self.ros_node = None
         self.ros_spin = None
 
@@ -559,7 +558,9 @@ class HandEyeWindow(QMainWindow):
         self.capture.start()
 
     def restart_camera(self):
-        self.stop_depth_worker(wait=True)
+        if self.depth_worker:
+            self.depth_worker.stop()
+            self.depth_worker = None
         if self.capture:
             self.capture.stop()
             self.capture = None
@@ -612,27 +613,10 @@ class HandEyeWindow(QMainWindow):
             return
         self.start_depth_worker()
 
-    def stop_depth_worker(self, wait=False):
+    def stop_depth_worker(self):
         if self.depth_worker:
-            worker = self.depth_worker
+            self.depth_worker.stop()
             self.depth_worker = None
-            try:
-                worker.result_ready.disconnect(self.on_depth_result)
-            except TypeError:
-                pass
-            if wait:
-                worker.stop()
-            else:
-                self.stopping_depth_workers.append(worker)
-                worker.finished.connect(lambda w=worker: self.cleanup_depth_worker(w))
-                worker.request_stop()
-
-    def cleanup_depth_worker(self, worker):
-        try:
-            self.stopping_depth_workers.remove(worker)
-        except ValueError:
-            pass
-        worker.deleteLater()
 
     def start_depth_worker(self):
         if self.rectifier is None or self.capture is None:
@@ -1139,9 +1123,8 @@ class HandEyeWindow(QMainWindow):
         self.stop_bringup(silent=True)
         if self.capture:
             self.capture.stop()
-        self.stop_depth_worker(wait=True)
-        for worker in list(self.stopping_depth_workers):
-            worker.stop()
+        if self.depth_worker:
+            self.depth_worker.stop()
         if self.ros_spin:
             self.ros_spin.stop()
         if self.ros_node:
