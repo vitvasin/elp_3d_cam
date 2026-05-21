@@ -447,3 +447,50 @@ w.apply_calibration(load_yaml('config/stereo_calib.yaml'))
 print('OK', w.depth_engine is not None)
 "
 ```
+
+## Secondary coding-agent guidance
+
+The project-specific instructions above have priority. The following general
+guidelines were merged from
+`https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md`.
+If any item conflicts with the project-specific workflow, app behavior, or run
+commands above, follow the project-specific instruction.
+
+### Think before coding
+
+Do not assume silently or hide uncertainty. Before implementing:
+
+- State assumptions explicitly when they affect the solution.
+- If multiple interpretations exist, surface them instead of choosing silently.
+- Mention simpler approaches or tradeoffs when they matter.
+- If something is unclear enough to risk the result, stop and ask.
+
+### Simplicity first
+
+Prefer the minimum code that solves the requested problem.
+
+- Do not add features beyond what was asked.
+- Avoid abstractions for single-use code.
+- Avoid speculative configurability.
+- Keep error handling proportional to realistic failure modes.
+- If the implementation is much larger than the problem, simplify it.
+
+### Surgical changes
+
+Touch only what the task requires.
+
+- Do not refactor unrelated code.
+- Match existing style.
+- Mention unrelated dead code instead of deleting it.
+- Remove only the unused imports, variables, or functions created by the current
+  change.
+
+Every changed line should trace back to the user request.
+
+### Goal-driven execution
+
+Define success with verifiable checks and loop until verified.
+
+For multi-step work, use a brief plan that pairs each step with a check. For
+bug fixes, prefer reproducing the issue first, then verifying the fix. For
+refactors, verify behavior before and after when feasible.
