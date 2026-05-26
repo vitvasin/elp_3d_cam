@@ -9,12 +9,16 @@ import sys
 import threading
 import time
 import subprocess
+import importlib.util
+from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -32,6 +36,8 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -69,6 +75,24 @@ def detection_label(det):
     return getattr(hyp, "id", "object"), float(getattr(hyp, "score", 0.0))
 
 
+PELLET_PROJECT_ROOT = Path("/home/admin01/workspace/pelletprototype")
+PELLET_VISION_PATH = PELLET_PROJECT_ROOT / "pellet_vision.py"
+PELLET_BOX_MODEL = PELLET_PROJECT_ROOT / "model_Onnx" / "box_best.onnx"
+PELLET_SEG_MODEL = PELLET_PROJECT_ROOT / "model_Onnx" / "seg_best.onnx"
+
+
+def load_pellet_detector_class():
+    """Load PelletDetector from the prototype project without changing cwd."""
+    if not PELLET_VISION_PATH.is_file():
+        raise RuntimeError(f"pellet_vision.py not found: {PELLET_VISION_PATH}")
+    spec = importlib.util.spec_from_file_location("pelletprototype_pellet_vision", PELLET_VISION_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot import pellet detector from {PELLET_VISION_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.PelletDetector
+
+
 class PickNode(MG400Node):
     """MG400 facade plus a subscriber for ELP detections."""
 
@@ -93,6 +117,7 @@ class PickNode(MG400Node):
 
 class RobotControlWindow(QMainWindow):
     detections_received = pyqtSignal(object)
+    pellet_result_received = pyqtSignal(object)
     log_received = pyqtSignal(str)
     pose_received = pyqtSignal(object, object)
     place_points_changed = pyqtSignal()
@@ -121,7 +146,16 @@ class RobotControlWindow(QMainWindow):
         self.cam_rectifier = None
         self.cam_depth_engine = None
         self.latest_depth = None
+        self.latest_left_rect = None
         self.clicked_robot = None
+        self.pellet_detector = None
+        self.pellet_loaded_paths = None
+        self.pellet_detections = []
+        self.pellet_selected = None
+        self.pellet_busy = False
+        self.pick_roi = None
+        self.roi_selecting = False
+        self.roi_first_point = None
         self.bringup_ready_checks_remaining = 0
 
         self.list = QListWidget()
@@ -183,6 +217,28 @@ class RobotControlWindow(QMainWindow):
         self.click_y_offset.valueChanged.connect(self.update_clicked_robot_offset)
         self.click_z_offset.valueChanged.connect(self.update_clicked_robot_offset)
         self.click_label = QLabel("Clicked target: -")
+        self.pellet_box_model = QLineEdit(str(PELLET_BOX_MODEL))
+        self.pellet_seg_model = QLineEdit(str(PELLET_SEG_MODEL))
+        self.pellet_box_conf = self._spin(0.01, 1.0, 0.50, 0.05, decimals=2)
+        self.pellet_seg_conf = self._spin(0.01, 1.0, 0.50, 0.05, decimals=2)
+        self.pellet_seg_iou = self._spin(0.01, 1.0, 0.80, 0.05, decimals=2)
+        self.pellet_use_angle = QCheckBox("Use pellet orientation for R yaw")
+        self.pellet_use_angle.setChecked(True)
+        self.pick_roi_enabled = QCheckBox("Use pickup ROI")
+        self.pick_roi_crop = QCheckBox("Crop detection to ROI")
+        self.pick_roi_crop.setChecked(True)
+        self.pick_roi_label = QLabel("Pickup ROI: full image")
+        self.pick_roi_label.setWordWrap(True)
+        self.pellet_status = QLabel("Pellet detector: not loaded")
+        self.pellet_status.setWordWrap(True)
+        self.pellet_table = QTableWidget(0, 5)
+        self.pellet_table.setHorizontalHeaderLabels(["#", "score", "color", "angle", "uv"])
+        self.pellet_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.pellet_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.pellet_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.pellet_table.verticalHeader().setVisible(False)
+        self.pellet_table.setMinimumHeight(120)
+        self.pellet_table.itemSelectionChanged.connect(self.on_pellet_table_selection_changed)
 
         form = QFormLayout()
         form.addRow("Approach Z (m)", self.approach_z)
@@ -232,6 +288,7 @@ class RobotControlWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
 
         self.detections_received.connect(self.on_detections)
+        self.pellet_result_received.connect(self.on_pellet_result)
         self.log_received.connect(self.append_log)
         self.pose_received.connect(self.on_pose_received)
         self.place_points_changed.connect(self.refresh_place_points)
@@ -278,6 +335,17 @@ class RobotControlWindow(QMainWindow):
                 "accel": self.click_accel.value(),
                 "near_accel": self.click_near_accel.value(),
                 "move_type": self.click_move_type.currentText(),
+            },
+            "pellet_detection": {
+                "box_model": self.pellet_box_model.text().strip(),
+                "seg_model": self.pellet_seg_model.text().strip(),
+                "box_conf": self.pellet_box_conf.value(),
+                "seg_conf": self.pellet_seg_conf.value(),
+                "seg_iou": self.pellet_seg_iou.value(),
+                "use_angle": self.pellet_use_angle.isChecked(),
+                "roi_enabled": self.pick_roi_enabled.isChecked(),
+                "roi_crop": self.pick_roi_crop.isChecked(),
+                "roi": list(self.pick_roi) if self.pick_roi is not None else None,
             },
             "gripper": {
                 "do_type": self.do_type.currentText(),
@@ -359,6 +427,21 @@ class RobotControlWindow(QMainWindow):
             mt_idx = self.click_move_type.findText(move_type)
             if mt_idx >= 0:
                 self.click_move_type.setCurrentIndex(mt_idx)
+
+        pellet = data.get("pellet_detection", {})
+        if isinstance(pellet, dict):
+            self.pellet_box_model.setText(str(pellet.get("box_model", self.pellet_box_model.text())))
+            self.pellet_seg_model.setText(str(pellet.get("seg_model", self.pellet_seg_model.text())))
+            self.pellet_box_conf.setValue(float(pellet.get("box_conf", self.pellet_box_conf.value())))
+            self.pellet_seg_conf.setValue(float(pellet.get("seg_conf", self.pellet_seg_conf.value())))
+            self.pellet_seg_iou.setValue(float(pellet.get("seg_iou", self.pellet_seg_iou.value())))
+            self.pellet_use_angle.setChecked(bool(pellet.get("use_angle", self.pellet_use_angle.isChecked())))
+            self.pick_roi_enabled.setChecked(bool(pellet.get("roi_enabled", self.pick_roi_enabled.isChecked())))
+            self.pick_roi_crop.setChecked(bool(pellet.get("roi_crop", self.pick_roi_crop.isChecked())))
+            roi = pellet.get("roi")
+            if isinstance(roi, (list, tuple)) and len(roi) >= 4:
+                self.pick_roi = tuple(int(v) for v in roi[:4])
+                self.update_pick_roi_label()
 
         gripper = data.get("gripper", {})
         if isinstance(gripper, dict):
@@ -486,11 +569,14 @@ class RobotControlWindow(QMainWindow):
 
     def build_camera_pick_tab(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        layout = QHBoxLayout(tab)
 
         self.pick_image = ImagePanel("Camera Pick - Rectified Left")
         self.pick_image.clicked.connect(self.on_camera_pick_click)
-        layout.addWidget(self.pick_image, 1)
+        layout.addWidget(self.pick_image, 2)
+
+        controls = QWidget()
+        controls_layout = QVBoxLayout(controls)
 
         form = QFormLayout()
         form.addRow("Robot X offset (mm)", self.click_x_offset)
@@ -504,8 +590,50 @@ class RobotControlWindow(QMainWindow):
         form.addRow("Accel (%)", self.click_accel)
         form.addRow("Near-approach accel (%)", self.click_near_accel)
         form.addRow("Move type", self.click_move_type)
-        layout.addLayout(form)
-        layout.addWidget(self.click_label)
+        controls_layout.addLayout(form)
+        controls_layout.addWidget(self.click_label)
+
+        detect_box = QGroupBox("Pellet Detection")
+        detect_layout = QVBoxLayout(detect_box)
+        detect_form = QFormLayout()
+        detect_form.addRow("Box model", self.pellet_box_model)
+        detect_form.addRow("Seg model", self.pellet_seg_model)
+        detect_form.addRow("Box conf", self.pellet_box_conf)
+        detect_form.addRow("Seg conf", self.pellet_seg_conf)
+        detect_form.addRow("Seg IoU", self.pellet_seg_iou)
+        detect_layout.addLayout(detect_form)
+        detect_layout.addWidget(self.pellet_use_angle)
+        detect_layout.addWidget(self.pick_roi_enabled)
+        detect_layout.addWidget(self.pick_roi_crop)
+        detect_layout.addWidget(self.pick_roi_label)
+        roi_row = QHBoxLayout()
+        btn_set_roi = QPushButton("Set ROI")
+        btn_clear_roi = QPushButton("Clear ROI")
+        btn_full_roi = QPushButton("Full ROI")
+        btn_set_roi.clicked.connect(self.start_pick_roi_selection)
+        btn_clear_roi.clicked.connect(self.clear_pick_roi)
+        btn_full_roi.clicked.connect(self.set_full_pick_roi)
+        roi_row.addWidget(btn_set_roi)
+        roi_row.addWidget(btn_clear_roi)
+        roi_row.addWidget(btn_full_roi)
+        detect_layout.addLayout(roi_row)
+        detect_layout.addWidget(self.pellet_status)
+        detect_layout.addWidget(self.pellet_table)
+        detect_row = QHBoxLayout()
+        btn_load_detector = QPushButton("Load Detector")
+        btn_detect = QPushButton("Detect Current")
+        btn_pick_detected = QPushButton("Pick Detected")
+        btn_select_detected = QPushButton("Select Row")
+        btn_load_detector.clicked.connect(self.load_pellet_detector)
+        btn_detect.clicked.connect(self.detect_current_pellet)
+        btn_pick_detected.clicked.connect(self.pick_detected_target)
+        btn_select_detected.clicked.connect(self.select_current_pellet_row)
+        detect_row.addWidget(btn_load_detector)
+        detect_row.addWidget(btn_detect)
+        detect_row.addWidget(btn_select_detected)
+        detect_row.addWidget(btn_pick_detected)
+        detect_layout.addLayout(detect_row)
+        controls_layout.addWidget(detect_box)
 
         row = QGridLayout()
         btn_start = QPushButton("Start Camera")
@@ -532,7 +660,14 @@ class RobotControlWindow(QMainWindow):
         row.addWidget(btn_uncover, 1, 2)
         row.addWidget(btn_save_offset, 2, 0, 1, 2)
         row.addWidget(self.btn_heatmap, 2, 2)
-        layout.addLayout(row)
+        controls_layout.addLayout(row)
+        controls_layout.addStretch(1)
+
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setWidget(controls)
+        controls_scroll.setMinimumWidth(360)
+        layout.addWidget(controls_scroll, 1)
 
         return tab
 
@@ -607,29 +742,41 @@ class RobotControlWindow(QMainWindow):
             self.append_log(f"Camera pick depth error: {result['error']}")
             return
         self.latest_depth = result["depth_map"]
+        self.latest_left_rect = result["left"].copy()
         if self.btn_heatmap.isChecked() and result.get("color") is not None:
             display = result["color"].copy()
         else:
             display = result["left"].copy()
+        self.draw_pick_roi_overlay(display)
+        self.draw_pellet_overlay(display)
         if self.clicked_robot is not None:
             xy = self.clicked_robot.get("uv")
             if xy is not None:
-                import cv2
                 cv2.drawMarker(display, tuple(xy), (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
         self.pick_image.show_image(display)
 
     def on_camera_pick_click(self, x, y):
+        if self.roi_selecting:
+            self.handle_pick_roi_click(int(x), int(y))
+            return
+        self.set_camera_pick_target_from_uv(int(x), int(y), source="click")
+
+    def set_camera_pick_target_from_uv(self, x, y, source="click", pellet=None):
+        if self.pick_roi_enabled.isChecked() and not self.point_in_pick_roi(x, y):
+            self.click_label.setText(f"{source.title()} target: outside pickup ROI")
+            self.clicked_robot = None
+            return False
         if self.cam_calib is None or self.cam_depth_engine is None or self.latest_depth is None:
             QMessageBox.information(self, "Camera Pick", "Need live calibrated depth first.")
-            return
+            return False
         if self.hand_eye_T is None:
             QMessageBox.warning(self, "Camera Pick", "Load config/hand_eye.yaml first.")
-            return
+            return False
         info = self.cam_depth_engine.pixel_info_from_map(self.latest_depth, x, y)
         if not info.valid:
-            self.click_label.setText("Clicked target: no valid depth")
+            self.click_label.setText(f"{source.title()} target: no valid depth")
             self.clicked_robot = None
-            return
+            return False
         cam_mm = pixel_to_camera_xyz(int(x), int(y), info.depth_mm, self.cam_calib.P1)
         cam_m = np.asarray(cam_mm, dtype=np.float64) / 1000.0
         robot = self.hand_eye_T @ np.array([cam_m[0], cam_m[1], cam_m[2], 1.0])
@@ -644,8 +791,308 @@ class RobotControlWindow(QMainWindow):
             "robot_base_m": robot_base,
             "depth_mm": float(info.depth_mm),
             "std_mm": float(info.sample_std_mm),
+            "source": source,
+            "pellet": pellet,
         }
+        if pellet is not None and self.pellet_use_angle.isChecked():
+            self.click_r.setValue(float(pellet.get("orientation", self.click_r.value())))
         self.update_clicked_robot_offset()
+        return True
+
+    def load_pellet_detector(self):
+        box_path = self.pellet_box_model.text().strip()
+        seg_path = self.pellet_seg_model.text().strip()
+        paths = (box_path, seg_path)
+        if self.pellet_detector is not None and self.pellet_loaded_paths == paths:
+            self.pellet_status.setText("Pellet detector: loaded")
+            return True
+        if not box_path or not seg_path:
+            QMessageBox.warning(self, "Pellet Detection", "Set both model paths first.")
+            return False
+        try:
+            detector_cls = load_pellet_detector_class()
+            self.pellet_detector = detector_cls(box_path, seg_path)
+            self.pellet_loaded_paths = paths
+        except Exception as exc:  # noqa: BLE001
+            self.pellet_detector = None
+            self.pellet_loaded_paths = None
+            self.pellet_status.setText(f"Pellet detector load failed: {exc}")
+            self.append_log(f"Pellet detector load failed: {exc}")
+            return False
+        self.pellet_status.setText("Pellet detector: loaded")
+        self.append_log("Pellet detector loaded.")
+        return True
+
+    def current_image_size(self):
+        if self.latest_left_rect is None:
+            return None
+        h, w = self.latest_left_rect.shape[:2]
+        return w, h
+
+    def normalized_pick_roi(self):
+        if self.pick_roi is None:
+            return None
+        size = self.current_image_size()
+        if size is None:
+            return self.pick_roi
+        w, h = size
+        x, y, rw, rh = self.pick_roi
+        x = max(0, min(int(x), w - 1))
+        y = max(0, min(int(y), h - 1))
+        rw = max(1, min(int(rw), w - x))
+        rh = max(1, min(int(rh), h - y))
+        return x, y, rw, rh
+
+    def update_pick_roi_label(self):
+        roi = self.normalized_pick_roi()
+        if roi is None:
+            self.pick_roi_label.setText("Pickup ROI: full image")
+            return
+        x, y, w, h = roi
+        self.pick_roi_label.setText(f"Pickup ROI: x={x} y={y} w={w} h={h}")
+
+    def start_pick_roi_selection(self):
+        if self.latest_left_rect is None:
+            QMessageBox.information(self, "Pickup ROI", "Start camera and wait for an image first.")
+            return
+        self.roi_selecting = True
+        self.roi_first_point = None
+        self.pick_roi_enabled.setChecked(True)
+        self.pick_roi_label.setText("Pickup ROI: click first corner")
+
+    def handle_pick_roi_click(self, x, y):
+        if self.roi_first_point is None:
+            self.roi_first_point = (int(x), int(y))
+            self.pick_roi_label.setText("Pickup ROI: click opposite corner")
+            return
+        x0, y0 = self.roi_first_point
+        x1, y1 = int(x), int(y)
+        rx = min(x0, x1)
+        ry = min(y0, y1)
+        rw = abs(x1 - x0) + 1
+        rh = abs(y1 - y0) + 1
+        self.pick_roi = (rx, ry, rw, rh)
+        self.roi_selecting = False
+        self.roi_first_point = None
+        self.update_pick_roi_label()
+        self.append_log(f"Pickup ROI set: {self.pick_roi_label.text()}")
+
+    def clear_pick_roi(self):
+        self.pick_roi = None
+        self.roi_selecting = False
+        self.roi_first_point = None
+        self.pellet_detections = []
+        self.pellet_selected = None
+        self.refresh_pellet_table()
+        self.update_pick_roi_label()
+
+    def set_full_pick_roi(self):
+        size = self.current_image_size()
+        if size is None:
+            self.clear_pick_roi()
+            return
+        w, h = size
+        self.pick_roi = (0, 0, int(w), int(h))
+        self.pick_roi_enabled.setChecked(True)
+        self.roi_selecting = False
+        self.roi_first_point = None
+        self.update_pick_roi_label()
+
+    def point_in_pick_roi(self, x, y):
+        roi = self.normalized_pick_roi()
+        if roi is None:
+            return True
+        rx, ry, rw, rh = roi
+        return rx <= int(x) < rx + rw and ry <= int(y) < ry + rh
+
+    def filter_detections_to_pick_roi(self, detections):
+        if not self.pick_roi_enabled.isChecked() or self.normalized_pick_roi() is None:
+            return detections
+        out = []
+        for det in detections:
+            try:
+                x = int(round(float(det["centroid_x"])))
+                y = int(round(float(det["centroid_y"])))
+            except Exception:  # noqa: BLE001
+                continue
+            if self.point_in_pick_roi(x, y):
+                out.append(det)
+        return out
+
+    def refresh_pellet_table(self):
+        self.pellet_table.blockSignals(True)
+        self.pellet_table.setRowCount(len(self.pellet_detections))
+        for row, det in enumerate(self.pellet_detections):
+            try:
+                x = int(round(float(det["centroid_x"])))
+                y = int(round(float(det["centroid_y"])))
+            except Exception:  # noqa: BLE001
+                x, y = 0, 0
+            values = [
+                str(row),
+                f"{float(det.get('score', 0.0)):.3f}",
+                str(det.get("color", "unknown")),
+                f"{float(det.get('orientation', 0.0)):.1f}",
+                f"{x},{y}",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, row)
+                self.pellet_table.setItem(row, col, item)
+        self.pellet_table.resizeColumnsToContents()
+        if self.pellet_selected in self.pellet_detections:
+            self.pellet_table.selectRow(self.pellet_detections.index(self.pellet_selected))
+        else:
+            self.pellet_table.clearSelection()
+        self.pellet_table.blockSignals(False)
+
+    def select_pellet_detection(self, index):
+        if index < 0 or index >= len(self.pellet_detections):
+            return False
+        pellet = self.pellet_detections[index]
+        self.pellet_selected = pellet
+        self.refresh_pellet_table()
+        x = int(round(float(pellet["centroid_x"])))
+        y = int(round(float(pellet["centroid_y"])))
+        ok = self.set_camera_pick_target_from_uv(x, y, source="pellet", pellet=pellet)
+        color = pellet.get("color", "unknown")
+        self.pellet_status.setText(
+            f"Pellet selected: row={index} uv=({x},{y}) "
+            f"score={float(pellet.get('score', 0.0)):.2f} "
+            f"angle={float(pellet.get('orientation', 0.0)):.1f} color={color}"
+        )
+        return ok
+
+    def selected_pellet_row(self):
+        rows = self.pellet_table.selectionModel().selectedRows()
+        if not rows:
+            return -1
+        return int(rows[0].row())
+
+    def select_current_pellet_row(self):
+        row = self.selected_pellet_row()
+        if row < 0:
+            QMessageBox.information(self, "Pellet Detection", "Select a target row first.")
+            return
+        self.select_pellet_detection(row)
+
+    def on_pellet_table_selection_changed(self):
+        row = self.selected_pellet_row()
+        if row >= 0:
+            self.select_pellet_detection(row)
+
+    def detect_current_pellet(self):
+        if self.latest_left_rect is None or self.latest_depth is None:
+            QMessageBox.information(self, "Pellet Detection", "Start camera and wait for a depth frame first.")
+            return
+        if self.hand_eye_T is None:
+            QMessageBox.warning(self, "Pellet Detection", "Load config/hand_eye.yaml first.")
+            return
+        if self.pellet_busy:
+            return
+        if not self.load_pellet_detector():
+            return
+        frame = self.latest_left_rect.copy()
+        roi = self.normalized_pick_roi() if self.pick_roi_enabled.isChecked() else None
+        roi_offset = (0, 0)
+        if roi is not None and self.pick_roi_crop.isChecked():
+            x, y, w, h = roi
+            frame = frame[y:y + h, x:x + w].copy()
+            roi_offset = (x, y)
+        box_conf = self.pellet_box_conf.value()
+        seg_conf = self.pellet_seg_conf.value()
+        seg_iou = self.pellet_seg_iou.value()
+        self.pellet_busy = True
+        self.pellet_status.setText("Pellet detector: running ...")
+
+        def run():
+            try:
+                result = self.pellet_detector.predict(
+                    image_source=frame,
+                    box_conf=box_conf,
+                    seg_conf=seg_conf,
+                    seg_iou=seg_iou,
+                )
+                if roi_offset != (0, 0) and result.get("status") == "success":
+                    ox, oy = roi_offset
+                    for det in result.get("data", []):
+                        det["centroid_x"] = float(det["centroid_x"]) + ox
+                        det["centroid_y"] = float(det["centroid_y"]) + oy
+            except Exception as exc:  # noqa: BLE001
+                result = {"status": "error", "message": str(exc), "data": []}
+            self.pellet_result_received.emit(result)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_pellet_result(self, result):
+        self.pellet_busy = False
+        if result.get("status") != "success":
+            self.pellet_detections = []
+            self.pellet_selected = None
+            self.refresh_pellet_table()
+            msg = result.get("message", "no pellet detected")
+            self.pellet_status.setText(f"Pellet detector: {msg}")
+            self.append_log(f"Pellet detection: {msg}")
+            return
+
+        raw_detections = list(result.get("data", []))
+        detections = self.filter_detections_to_pick_roi(raw_detections)
+        self.pellet_detections = detections
+        if not detections:
+            self.pellet_selected = None
+            self.refresh_pellet_table()
+            if raw_detections:
+                self.pellet_status.setText("Pellet detector: no pellets inside pickup ROI")
+            else:
+                self.pellet_status.setText("Pellet detector: no pellets")
+            return
+
+        # Prototype API treats the first pellet as priority 0.
+        ok = self.select_pellet_detection(0)
+        pellet = self.pellet_detections[0]
+        color = pellet.get("color", "unknown")
+        self.pellet_status.setText(
+            f"Pellet detector: {len(detections)} found, selected "
+            f"uv=({int(round(float(pellet['centroid_x'])))},{int(round(float(pellet['centroid_y'])))}) "
+            f"score={float(pellet.get('score', 0.0)):.2f} "
+            f"angle={float(pellet.get('orientation', 0.0)):.1f} color={color}"
+        )
+        if ok:
+            self.append_log(
+                f"Pellet target uv=({int(round(float(pellet['centroid_x'])))},"
+                f"{int(round(float(pellet['centroid_y'])))}) "
+                f"score={float(pellet.get('score', 0.0)):.2f} "
+                f"angle={float(pellet.get('orientation', 0.0)):.1f} color={color}"
+            )
+
+    def draw_pellet_overlay(self, display):
+        for det in self.pellet_detections:
+            try:
+                x = int(round(float(det["centroid_x"])))
+                y = int(round(float(det["centroid_y"])))
+            except Exception:  # noqa: BLE001
+                continue
+            color = (0, 180, 255)
+            if det is self.pellet_selected:
+                color = (0, 255, 255)
+            cv2.drawMarker(display, (x, y), color, cv2.MARKER_TILTED_CROSS, 20, 2)
+            label = f"{det.get('color', '?')} {float(det.get('score', 0.0)):.2f}"
+            cv2.putText(
+                display, label, (x + 8, max(16, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+            )
+
+    def draw_pick_roi_overlay(self, display):
+        roi = self.normalized_pick_roi()
+        if roi is None:
+            return
+        x, y, w, h = roi
+        color = (255, 180, 0)
+        cv2.rectangle(display, (x, y), (x + w - 1, y + h - 1), color, 2)
+        cv2.putText(
+            display, "pickup ROI", (x + 6, max(18, y + 20)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA,
+        )
 
     def update_clicked_robot_offset(self):
         if self.clicked_robot is None or "robot_base_m" not in self.clicked_robot:
@@ -659,12 +1106,22 @@ class RobotControlWindow(QMainWindow):
         uv = self.clicked_robot.get("uv", ("-", "-"))
         depth = self.clicked_robot.get("depth_mm", float("nan"))
         std = self.clicked_robot.get("std_mm", float("nan"))
+        source = self.clicked_robot.get("source", "click")
+        pellet = self.clicked_robot.get("pellet") or {}
+        pellet_text = ""
+        if pellet:
+            pellet_text = (
+                f"  pellet={pellet.get('color', 'unknown')} "
+                f"score={float(pellet.get('score', 0.0)):.2f} "
+                f"angle={float(pellet.get('orientation', 0.0)):.1f}"
+            )
         self.click_label.setText(
-            "Clicked target: "
+            f"{source.title()} target: "
             f"uv=({uv[0]},{uv[1]}) depth={depth:.1f} +/-{std:.1f} mm  "
             f"offset=({self.click_x_offset.value():+.1f}, {self.click_y_offset.value():+.1f}, "
             f"{self.click_z_offset.value():+.1f}) mm  "
             f"robot=({robot_xyz[0]:+.4f}, {robot_xyz[1]:+.4f}, {robot_xyz[2]:+.4f}) m"
+            f"{pellet_text}"
         )
 
     def save_camera_pick_offset(self):
@@ -729,6 +1186,12 @@ class RobotControlWindow(QMainWindow):
             args=(target, params),
             daemon=True,
         ).start()
+
+    def pick_detected_target(self):
+        if self.clicked_robot is None or self.clicked_robot.get("source") != "pellet":
+            QMessageBox.information(self, "Pellet Detection", "Run Detect Current first.")
+            return
+        self.pick_clicked_target()
 
     def build_auto_tab(self):
         tab = QWidget()

@@ -106,7 +106,16 @@ Override the device in `config/default.yaml` if needed.
    calibrated stereo camera directly, lets you click a rectified-left image
    point, transforms the clicked depth point through `config/hand_eye.yaml`,
    applies a robot Z offset, then moves to or picks that clicked point for
-   end-to-end calibration testing.
+   end-to-end calibration testing. Camera Pick can also load the pellet
+   prototype API from `/home/admin01/workspace/pelletprototype`, run its box
+   and segmentation models on the current rectified-left frame, and reuse the
+   same depth/hand-eye/offset pick workflow for detected pellets. The image
+   stays beside a scrollable control panel; pellet targets are listed in a
+   selectable table with score, color, orientation, and pixel coordinate. A
+   two-click pickup ROI can constrain manual clicks, crop model inference, and
+   filter the available pellet targets before picking. Pellet model paths,
+   thresholds, ROI, and camera-pick motion settings are saved to
+   `config/robot_control.yaml`.
 
 ## Notes
 
