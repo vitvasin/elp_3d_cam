@@ -113,9 +113,12 @@ Override the device in `config/default.yaml` if needed.
    stays beside a scrollable control panel; pellet targets are listed in a
    selectable table with score, color, orientation, and pixel coordinate. A
    two-click pickup ROI can constrain manual clicks, crop model inference, and
-   filter the available pellet targets before picking. Pellet model paths,
-   thresholds, ROI, and camera-pick motion settings are saved to
-   `config/robot_control.yaml`.
+   filter the available pellet targets before picking. The Pellet Home Loop
+   starts each cycle from the saved home pose, detects pellets inside the ROI,
+   picks the highest-confidence target, returns home, opens the gripper, and
+   repeats until stopped or the configured max cycle count is reached. Pellet
+   model paths, thresholds, ROI, loop timing, and camera-pick motion settings
+   are saved to `config/robot_control.yaml`.
 
 ## Notes
 

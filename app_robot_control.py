@@ -79,6 +79,7 @@ PELLET_PROJECT_ROOT = Path("/home/admin01/workspace/pelletprototype")
 PELLET_VISION_PATH = PELLET_PROJECT_ROOT / "pellet_vision.py"
 PELLET_BOX_MODEL = PELLET_PROJECT_ROOT / "model_Onnx" / "box_best.onnx"
 PELLET_SEG_MODEL = PELLET_PROJECT_ROOT / "model_Onnx" / "seg_best.onnx"
+ROBOT_MIN_Z_M = -0.068
 
 
 def load_pellet_detector_class():
@@ -118,6 +119,7 @@ class PickNode(MG400Node):
 class RobotControlWindow(QMainWindow):
     detections_received = pyqtSignal(object)
     pellet_result_received = pyqtSignal(object)
+    pellet_loop_status_received = pyqtSignal(str)
     log_received = pyqtSignal(str)
     pose_received = pyqtSignal(object, object)
     place_points_changed = pyqtSignal()
@@ -156,6 +158,9 @@ class RobotControlWindow(QMainWindow):
         self.pick_roi = None
         self.roi_selecting = False
         self.roi_first_point = None
+        self.pellet_loop_running = False
+        self.pellet_loop_stop = threading.Event()
+        self.pellet_loop_thread = None
         self.bringup_ready_checks_remaining = 0
 
         self.list = QListWidget()
@@ -165,11 +170,11 @@ class RobotControlWindow(QMainWindow):
         self.bringup_status = QLabel("Bringup: not started")
         self.bringup_status.setWordWrap(True)
 
-        self.approach_z = self._spin(-0.500, 1.0, 0.150, 0.005)
+        self.approach_z = self._spin(ROBOT_MIN_Z_M, 1.0, 0.150, 0.005)
         self.pick_z_offset = self._spin(-0.100, 0.100, 0.000, 0.001)
         self.place_x = self._spin(-1.0, 1.0, 0.300, 0.005)
         self.place_y = self._spin(-1.0, 1.0, 0.000, 0.005)
-        self.place_z = self._spin(-0.500, 1.0, 0.150, 0.005)
+        self.place_z = self._spin(ROBOT_MIN_Z_M, 1.0, 0.150, 0.005)
         self.r_deg = self._spin(-180.0, 180.0, 0.0, 1.0)
         self.do_index = QSpinBox()
         self.do_index.setRange(1, 16)
@@ -183,12 +188,12 @@ class RobotControlWindow(QMainWindow):
 
         self.manual_x = self._spin(-1.0, 1.0, 0.300, 0.005)
         self.manual_y = self._spin(-1.0, 1.0, 0.000, 0.005)
-        self.manual_z = self._spin(-0.500, 1.0, 0.150, 0.005)
+        self.manual_z = self._spin(ROBOT_MIN_Z_M, 1.0, 0.150, 0.005)
         self.manual_r = self._spin(-180.0, 180.0, 0.0, 1.0)
         self.jog_step = self._spin(0.001, 0.100, 0.010, 0.001)
         self.auto_place_x = self._spin(-1.0, 1.0, 0.300, 0.005)
         self.auto_place_y = self._spin(-1.0, 1.0, 0.000, 0.005)
-        self.auto_place_z = self._spin(-0.500, 1.0, 0.150, 0.005)
+        self.auto_place_z = self._spin(ROBOT_MIN_Z_M, 1.0, 0.150, 0.005)
         self.place_list = QListWidget()
         self.place_list.currentRowChanged.connect(self.on_place_selected)
         self.place_index_label = QLabel("Next place: 0")
@@ -222,8 +227,13 @@ class RobotControlWindow(QMainWindow):
         self.pellet_box_conf = self._spin(0.01, 1.0, 0.50, 0.05, decimals=2)
         self.pellet_seg_conf = self._spin(0.01, 1.0, 0.50, 0.05, decimals=2)
         self.pellet_seg_iou = self._spin(0.01, 1.0, 0.80, 0.05, decimals=2)
+        self.pellet_r_offset = self._spin(-180.0, 180.0, 40.0, 1.0, decimals=1)
+        self.pellet_device = QComboBox()
+        self.pellet_device.addItems(["Auto", "GPU 0", "CPU"])
         self.pellet_use_angle = QCheckBox("Use pellet orientation for R yaw")
         self.pellet_use_angle.setChecked(True)
+        self.pellet_show_confidence = QCheckBox("Show confidence labels")
+        self.pellet_show_confidence.setChecked(False)
         self.pick_roi_enabled = QCheckBox("Use pickup ROI")
         self.pick_roi_crop = QCheckBox("Crop detection to ROI")
         self.pick_roi_crop.setChecked(True)
@@ -239,6 +249,13 @@ class RobotControlWindow(QMainWindow):
         self.pellet_table.verticalHeader().setVisible(False)
         self.pellet_table.setMinimumHeight(120)
         self.pellet_table.itemSelectionChanged.connect(self.on_pellet_table_selection_changed)
+        self.pellet_loop_delay = self._spin(0.0, 30.0, 1.0, 0.5, decimals=1)
+        self.pellet_home_settle = self._spin(0.0, 10.0, 0.5, 0.1, decimals=1)
+        self.pellet_loop_max_cycles = QSpinBox()
+        self.pellet_loop_max_cycles.setRange(0, 9999)
+        self.pellet_loop_max_cycles.setValue(0)
+        self.pellet_loop_status = QLabel("Pellet loop: stopped")
+        self.pellet_loop_status.setWordWrap(True)
 
         form = QFormLayout()
         form.addRow("Approach Z (m)", self.approach_z)
@@ -289,6 +306,7 @@ class RobotControlWindow(QMainWindow):
 
         self.detections_received.connect(self.on_detections)
         self.pellet_result_received.connect(self.on_pellet_result)
+        self.pellet_loop_status_received.connect(self.pellet_loop_status.setText)
         self.log_received.connect(self.append_log)
         self.pose_received.connect(self.on_pose_received)
         self.place_points_changed.connect(self.refresh_place_points)
@@ -343,9 +361,17 @@ class RobotControlWindow(QMainWindow):
                 "seg_conf": self.pellet_seg_conf.value(),
                 "seg_iou": self.pellet_seg_iou.value(),
                 "use_angle": self.pellet_use_angle.isChecked(),
+                "show_confidence": self.pellet_show_confidence.isChecked(),
+                "r_offset_deg": self.pellet_r_offset.value(),
+                "device": self.pellet_device.currentText(),
                 "roi_enabled": self.pick_roi_enabled.isChecked(),
                 "roi_crop": self.pick_roi_crop.isChecked(),
                 "roi": list(self.pick_roi) if self.pick_roi is not None else None,
+            },
+            "pellet_loop": {
+                "delay_s": self.pellet_loop_delay.value(),
+                "home_settle_s": self.pellet_home_settle.value(),
+                "max_cycles": self.pellet_loop_max_cycles.value(),
             },
             "gripper": {
                 "do_type": self.do_type.currentText(),
@@ -436,12 +462,24 @@ class RobotControlWindow(QMainWindow):
             self.pellet_seg_conf.setValue(float(pellet.get("seg_conf", self.pellet_seg_conf.value())))
             self.pellet_seg_iou.setValue(float(pellet.get("seg_iou", self.pellet_seg_iou.value())))
             self.pellet_use_angle.setChecked(bool(pellet.get("use_angle", self.pellet_use_angle.isChecked())))
+            self.pellet_show_confidence.setChecked(bool(pellet.get("show_confidence", self.pellet_show_confidence.isChecked())))
+            self.pellet_r_offset.setValue(float(pellet.get("r_offset_deg", self.pellet_r_offset.value())))
+            device = str(pellet.get("device", self.pellet_device.currentText()))
+            device_i = self.pellet_device.findText(device)
+            if device_i >= 0:
+                self.pellet_device.setCurrentIndex(device_i)
             self.pick_roi_enabled.setChecked(bool(pellet.get("roi_enabled", self.pick_roi_enabled.isChecked())))
             self.pick_roi_crop.setChecked(bool(pellet.get("roi_crop", self.pick_roi_crop.isChecked())))
             roi = pellet.get("roi")
             if isinstance(roi, (list, tuple)) and len(roi) >= 4:
                 self.pick_roi = tuple(int(v) for v in roi[:4])
                 self.update_pick_roi_label()
+
+        pellet_loop = data.get("pellet_loop", {})
+        if isinstance(pellet_loop, dict):
+            self.pellet_loop_delay.setValue(float(pellet_loop.get("delay_s", self.pellet_loop_delay.value())))
+            self.pellet_home_settle.setValue(float(pellet_loop.get("home_settle_s", self.pellet_home_settle.value())))
+            self.pellet_loop_max_cycles.setValue(int(pellet_loop.get("max_cycles", self.pellet_loop_max_cycles.value())))
 
         gripper = data.get("gripper", {})
         if isinstance(gripper, dict):
@@ -497,19 +535,6 @@ class RobotControlWindow(QMainWindow):
         row.addWidget(btn_movl)
         form.addRow(row)
 
-        home_row = QHBoxLayout()
-        btn_set_home = QPushButton("Save Home")
-        btn_home = QPushButton("Go Home")
-        btn_load_cfg = QPushButton("Load YAML")
-        btn_set_home.clicked.connect(self.save_home_from_manual)
-        btn_home.clicked.connect(self.go_home)
-        btn_load_cfg.clicked.connect(self.load_robot_config)
-        home_row.addWidget(btn_set_home)
-        home_row.addWidget(btn_home)
-        home_row.addWidget(btn_load_cfg)
-        form.addRow(self.home_label)
-        form.addRow(home_row)
-
         jog_box = QGroupBox("Jog")
         grid = QGridLayout(jog_box)
         for label, axis, sign, row_i, col_i in (
@@ -553,6 +578,19 @@ class RobotControlWindow(QMainWindow):
         bringup_row.addWidget(btn_check, 1, 2)
         state_layout.addLayout(bringup_row)
         state_layout.addWidget(self.bringup_status)
+
+        home_row = QHBoxLayout()
+        btn_set_home = QPushButton("Save Home")
+        btn_home = QPushButton("Go Home")
+        btn_load_cfg = QPushButton("Load YAML")
+        btn_set_home.clicked.connect(self.save_home_from_manual)
+        btn_home.clicked.connect(self.go_home)
+        btn_load_cfg.clicked.connect(self.load_robot_config)
+        home_row.addWidget(btn_set_home)
+        home_row.addWidget(btn_home)
+        home_row.addWidget(btn_load_cfg)
+        state_layout.addWidget(self.home_label)
+        state_layout.addLayout(home_row)
 
         state_row = QHBoxLayout()
         btn_clear = QPushButton("Clear Error")
@@ -601,8 +639,11 @@ class RobotControlWindow(QMainWindow):
         detect_form.addRow("Box conf", self.pellet_box_conf)
         detect_form.addRow("Seg conf", self.pellet_seg_conf)
         detect_form.addRow("Seg IoU", self.pellet_seg_iou)
+        detect_form.addRow("R offset (deg)", self.pellet_r_offset)
+        detect_form.addRow("Inference device", self.pellet_device)
         detect_layout.addLayout(detect_form)
         detect_layout.addWidget(self.pellet_use_angle)
+        detect_layout.addWidget(self.pellet_show_confidence)
         detect_layout.addWidget(self.pick_roi_enabled)
         detect_layout.addWidget(self.pick_roi_crop)
         detect_layout.addWidget(self.pick_roi_label)
@@ -633,6 +674,23 @@ class RobotControlWindow(QMainWindow):
         detect_row.addWidget(btn_select_detected)
         detect_row.addWidget(btn_pick_detected)
         detect_layout.addLayout(detect_row)
+        loop_box = QGroupBox("Pellet Home Loop")
+        loop_layout = QVBoxLayout(loop_box)
+        loop_form = QFormLayout()
+        loop_form.addRow("Loop delay (s)", self.pellet_loop_delay)
+        loop_form.addRow("Home settle (s)", self.pellet_home_settle)
+        loop_form.addRow("Max cycles (0=forever)", self.pellet_loop_max_cycles)
+        loop_layout.addLayout(loop_form)
+        loop_layout.addWidget(self.pellet_loop_status)
+        loop_row = QHBoxLayout()
+        btn_loop_start = QPushButton("Start Loop")
+        btn_loop_stop = QPushButton("Stop Loop")
+        btn_loop_start.clicked.connect(self.start_pellet_home_loop)
+        btn_loop_stop.clicked.connect(self.stop_pellet_home_loop)
+        loop_row.addWidget(btn_loop_start)
+        loop_row.addWidget(btn_loop_stop)
+        loop_layout.addLayout(loop_row)
+        detect_layout.addWidget(loop_box)
         controls_layout.addWidget(detect_box)
 
         row = QGridLayout()
@@ -724,6 +782,7 @@ class RobotControlWindow(QMainWindow):
         self.depth_worker.start()
 
     def stop_camera_pick(self):
+        self.stop_pellet_home_loop()
         if self.depth_worker:
             self.depth_worker.stop()
             self.depth_worker = None
@@ -795,7 +854,12 @@ class RobotControlWindow(QMainWindow):
             "pellet": pellet,
         }
         if pellet is not None and self.pellet_use_angle.isChecked():
-            self.click_r.setValue(float(pellet.get("orientation", self.click_r.value())))
+            r = float(pellet.get("orientation", 0.0)) + self.pellet_r_offset.value()
+            while r > 180.0:
+                r -= 360.0
+            while r < -180.0:
+                r += 360.0
+            self.click_r.setValue(r)
         self.update_clicked_robot_offset()
         return True
 
@@ -822,6 +886,94 @@ class RobotControlWindow(QMainWindow):
         self.pellet_status.setText("Pellet detector: loaded")
         self.append_log("Pellet detector loaded.")
         return True
+
+    def pellet_device_arg(self):
+        mode = self.pellet_device.currentText()
+        if mode == "GPU 0":
+            return "0"
+        if mode == "CPU":
+            return "cpu"
+        return None
+
+    def configure_pellet_device(self):
+        device = self.pellet_device_arg()
+        if self.pellet_detector is None or device is None:
+            return
+        if device != "cpu":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    self.append_log("GPU requested, but torch CUDA is not available; inference may fail or stay on CPU.")
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"GPU requested, but torch CUDA check failed: {exc}")
+        for attr in ("box_model", "seg_model"):
+            model = getattr(self.pellet_detector, attr, None)
+            overrides = getattr(model, "overrides", None)
+            if isinstance(overrides, dict):
+                overrides["device"] = device
+            predictor = getattr(model, "predictor", None)
+            args = getattr(predictor, "args", None)
+            if args is not None and hasattr(args, "device"):
+                args.device = device
+
+    def run_pellet_detector_on_frame(self, frame):
+        roi = self.normalized_pick_roi() if self.pick_roi_enabled.isChecked() else None
+        roi_offset = (0, 0)
+        detect_frame = frame
+        if roi is not None and self.pick_roi_crop.isChecked():
+            x, y, w, h = roi
+            detect_frame = frame[y:y + h, x:x + w].copy()
+            roi_offset = (x, y)
+        result = self.pellet_detector.predict(
+            image_source=detect_frame,
+            box_conf=self.pellet_box_conf.value(),
+            seg_conf=self.pellet_seg_conf.value(),
+            seg_iou=self.pellet_seg_iou.value(),
+        )
+        if roi_offset != (0, 0) and result.get("status") == "success":
+            ox, oy = roi_offset
+            for det in result.get("data", []):
+                det["centroid_x"] = float(det["centroid_x"]) + ox
+                det["centroid_y"] = float(det["centroid_y"]) + oy
+        return result
+
+    def camera_pick_target_from_pellet(self, pellet, depth_map):
+        x = int(round(float(pellet["centroid_x"])))
+        y = int(round(float(pellet["centroid_y"])))
+        if self.pick_roi_enabled.isChecked() and not self.point_in_pick_roi(x, y):
+            return None, "outside pickup ROI"
+        if self.cam_calib is None or self.cam_depth_engine is None or depth_map is None:
+            return None, "need calibrated depth"
+        if self.hand_eye_T is None:
+            return None, "need hand-eye calibration"
+        info = self.cam_depth_engine.pixel_info_from_map(depth_map, x, y)
+        if not info.valid:
+            return None, "no valid depth"
+        cam_mm = pixel_to_camera_xyz(x, y, info.depth_mm, self.cam_calib.P1)
+        cam_m = np.asarray(cam_mm, dtype=np.float64) / 1000.0
+        robot = self.hand_eye_T @ np.array([cam_m[0], cam_m[1], cam_m[2], 1.0])
+        robot_base = (float(robot[0]), float(robot[1]), float(robot[2]))
+        ox = self.click_x_offset.value() / 1000.0
+        oy = self.click_y_offset.value() / 1000.0
+        oz = self.click_z_offset.value() / 1000.0
+        robot_m = (robot_base[0] + ox, robot_base[1] + oy, robot_base[2] + oz)
+        r = self.click_r.value()
+        if self.pellet_use_angle.isChecked():
+            r = float(pellet.get("orientation", 0.0)) + self.pellet_r_offset.value()
+            while r > 180.0:
+                r -= 360.0
+            while r < -180.0:
+                r += 360.0
+        target = {
+            "uv": (x, y),
+            "robot_m": robot_m,
+            "robot_base_m": robot_base,
+            "depth_mm": float(info.depth_mm),
+            "std_mm": float(info.sample_std_mm),
+            "r": r,
+            "pellet": pellet,
+        }
+        return target, None
 
     def current_image_size(self):
         if self.latest_left_rect is None:
@@ -992,32 +1144,14 @@ class RobotControlWindow(QMainWindow):
             return
         if not self.load_pellet_detector():
             return
+        self.configure_pellet_device()
         frame = self.latest_left_rect.copy()
-        roi = self.normalized_pick_roi() if self.pick_roi_enabled.isChecked() else None
-        roi_offset = (0, 0)
-        if roi is not None and self.pick_roi_crop.isChecked():
-            x, y, w, h = roi
-            frame = frame[y:y + h, x:x + w].copy()
-            roi_offset = (x, y)
-        box_conf = self.pellet_box_conf.value()
-        seg_conf = self.pellet_seg_conf.value()
-        seg_iou = self.pellet_seg_iou.value()
         self.pellet_busy = True
         self.pellet_status.setText("Pellet detector: running ...")
 
         def run():
             try:
-                result = self.pellet_detector.predict(
-                    image_source=frame,
-                    box_conf=box_conf,
-                    seg_conf=seg_conf,
-                    seg_iou=seg_iou,
-                )
-                if roi_offset != (0, 0) and result.get("status") == "success":
-                    ox, oy = roi_offset
-                    for det in result.get("data", []):
-                        det["centroid_x"] = float(det["centroid_x"]) + ox
-                        det["centroid_y"] = float(det["centroid_y"]) + oy
+                result = self.run_pellet_detector_on_frame(frame)
             except Exception as exc:  # noqa: BLE001
                 result = {"status": "error", "message": str(exc), "data": []}
             self.pellet_result_received.emit(result)
@@ -1075,12 +1209,15 @@ class RobotControlWindow(QMainWindow):
             color = (0, 180, 255)
             if det is self.pellet_selected:
                 color = (0, 255, 255)
-            cv2.drawMarker(display, (x, y), color, cv2.MARKER_TILTED_CROSS, 20, 2)
-            label = f"{det.get('color', '?')} {float(det.get('score', 0.0)):.2f}"
-            cv2.putText(
-                display, label, (x + 8, max(16, y - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
-            )
+            radius = 5 if det is self.pellet_selected else 4
+            cv2.circle(display, (x, y), radius, color, -1, cv2.LINE_AA)
+            cv2.circle(display, (x, y), radius + 2, (0, 0, 0), 1, cv2.LINE_AA)
+            if self.pellet_show_confidence.isChecked():
+                label = f"{det.get('color', '?')} {float(det.get('score', 0.0)):.2f}"
+                cv2.putText(
+                    display, label, (x + 8, max(16, y - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA,
+                )
 
     def draw_pick_roi_overlay(self, display):
         roi = self.normalized_pick_roi()
@@ -1192,6 +1329,131 @@ class RobotControlWindow(QMainWindow):
             QMessageBox.information(self, "Pellet Detection", "Run Detect Current first.")
             return
         self.pick_clicked_target()
+
+    def start_pellet_home_loop(self):
+        if self.node is None:
+            QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
+            return
+        if not self.home_pose:
+            QMessageBox.information(self, "Pellet Loop", "Save a home pose first.")
+            return
+        if self.latest_left_rect is None or self.latest_depth is None:
+            QMessageBox.information(self, "Pellet Loop", "Start camera and wait for depth first.")
+            return
+        if self.hand_eye_T is None:
+            QMessageBox.warning(self, "Pellet Loop", "Load config/hand_eye.yaml first.")
+            return
+        if self.pellet_loop_running:
+            return
+        if not self.load_pellet_detector():
+            return
+        self.configure_pellet_device()
+        self.pellet_loop_stop.clear()
+        self.pellet_loop_running = True
+        self.pellet_loop_status_received.emit("Pellet loop: running")
+        self.save_robot_config()
+        self.pellet_loop_thread = threading.Thread(
+            target=self.pellet_home_loop_sequence,
+            daemon=True,
+        )
+        self.pellet_loop_thread.start()
+
+    def stop_pellet_home_loop(self):
+        self.pellet_loop_stop.set()
+        if self.pellet_loop_running:
+            self.pellet_loop_status.setText("Pellet loop: stopping")
+        else:
+            self.pellet_loop_status.setText("Pellet loop: stopped")
+
+    def pellet_pick_params_for_target(self, target):
+        params = self.pick_params(use_place_list=False)
+        if params is None:
+            return None
+        params["place"] = (
+            float(self.home_pose["x"]),
+            float(self.home_pose["y"]),
+            float(self.home_pose["z"]),
+        )
+        params["place_i"] = None
+        params["r"] = float(target["r"])
+        params["approach_z"] = target["robot_m"][2] + self.click_approach_z.value() / 1000.0
+        params["release_at_approach"] = False
+        params["linear"] = self.click_move_type.currentText() == "MovL"
+        params["speed"] = self.click_speed.value()
+        params["accel"] = self.click_accel.value()
+        params["near_approach_z"] = target["robot_m"][2] + self.click_near_approach_z.value() / 1000.0
+        params["near_speed"] = self.click_near_speed.value()
+        params["near_accel"] = self.click_near_accel.value()
+        return params
+
+    def pellet_home_loop_sequence(self):
+        cycles = 0
+        max_cycles = int(self.pellet_loop_max_cycles.value())
+        delay_s = float(self.pellet_loop_delay.value())
+        settle_s = float(self.pellet_home_settle.value())
+        home = dict(self.home_pose)
+        try:
+            while not self.pellet_loop_stop.is_set():
+                if max_cycles > 0 and cycles >= max_cycles:
+                    self.log_received.emit("Pellet loop reached max cycles.")
+                    break
+                if self.busy:
+                    time.sleep(0.1)
+                    continue
+                self.busy = True
+                should_delay = True
+                try:
+                    self.pellet_loop_status_received.emit(f"Pellet loop: cycle {cycles + 1}")
+                    self.log_received.emit(f"Pellet loop cycle {cycles + 1}: go home")
+                    if not self._move(home["x"], home["y"], home["z"], home["r"], linear=False):
+                        break
+                    if not self._set_do(
+                        self.do_type.currentText() == "Tool DO",
+                        self.do_index.value(),
+                        1,
+                    ):
+                        break
+                    if settle_s > 0:
+                        time.sleep(settle_s)
+                    frame = self.latest_left_rect.copy() if self.latest_left_rect is not None else None
+                    depth = self.latest_depth.copy() if self.latest_depth is not None else None
+                    if frame is None or depth is None:
+                        self.log_received.emit("Pellet loop: no camera frame/depth yet.")
+                        continue
+                    result = self.run_pellet_detector_on_frame(frame)
+                    if result.get("status") != "success":
+                        self.pellet_result_received.emit(result)
+                        self.log_received.emit(f"Pellet loop detect: {result.get('message', 'no target')}")
+                        continue
+                    detections = self.filter_detections_to_pick_roi(list(result.get("data", [])))
+                    self.pellet_result_received.emit(result)
+                    if not detections:
+                        self.log_received.emit("Pellet loop: no target inside ROI.")
+                        continue
+                    pellet = max(detections, key=lambda det: float(det.get("score", 0.0)))
+                    target, err = self.camera_pick_target_from_pellet(pellet, depth)
+                    if target is None:
+                        self.log_received.emit(f"Pellet loop target skipped: {err}")
+                        continue
+                    params = self.pellet_pick_params_for_target(target)
+                    if params is None:
+                        break
+                    uv = target["uv"]
+                    self.log_received.emit(
+                        f"Pellet loop pick uv=({uv[0]},{uv[1]}) "
+                        f"score={float(pellet.get('score', 0.0)):.2f}"
+                    )
+                    self.pick_sequence(target["robot_m"], params)
+                    cycles += 1
+                finally:
+                    self.busy = False
+                    if should_delay and delay_s > 0 and not self.pellet_loop_stop.is_set():
+                        time.sleep(delay_s)
+        finally:
+            self.pellet_loop_running = False
+            self.pellet_loop_stop.set()
+            self.log_received.emit("Pellet loop stopped.")
+            self.pellet_loop_status_received.emit("Pellet loop: stopped")
 
     def build_auto_tab(self):
         tab = QWidget()
@@ -1679,6 +1941,9 @@ class RobotControlWindow(QMainWindow):
     def _move(self, x, y, z, r, linear=False, speed=None, accel=None):
         evt = threading.Event()
         out = {"ok": False, "msg": "timeout"}
+        if z < ROBOT_MIN_Z_M:
+            self._log(f"Z limited from {z:.4f} to {ROBOT_MIN_Z_M:.4f} m")
+            z = ROBOT_MIN_Z_M
 
         def done(ok, msg):
             out["ok"] = bool(ok)
