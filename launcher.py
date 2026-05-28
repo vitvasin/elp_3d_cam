@@ -60,7 +60,8 @@ class AppEntry:
     description: str
     script: str
     accent: str  # hex color
-    glyph: str   # short text or unicode glyph for the icon tile
+    glyph: str   # short text fallback if no icon image
+    icon: str    # filename in assets/ (procedural glyph fallback if missing)
 
 
 APPS: list[AppEntry] = [
@@ -75,6 +76,7 @@ APPS: list[AppEntry] = [
         script="app.py",
         accent=NEON_CYAN,
         glyph="CAL",
+        icon="icon_calib.png",
     ),
     AppEntry(
         key="detect",
@@ -87,6 +89,7 @@ APPS: list[AppEntry] = [
         script="app_detect.py",
         accent=NEON_GREEN,
         glyph="DET",
+        icon="icon_detect.png",
     ),
     AppEntry(
         key="handeye",
@@ -99,6 +102,7 @@ APPS: list[AppEntry] = [
         script="app_handeye.py",
         accent=NEON_AMBER,
         glyph="H-E",
+        icon="icon_handeye.png",
     ),
     AppEntry(
         key="robot",
@@ -111,6 +115,7 @@ APPS: list[AppEntry] = [
         script="app_robot_control.py",
         accent=NEON_RED,
         glyph="BOT",
+        icon="icon_robot.png",
     ),
 ]
 
@@ -301,6 +306,17 @@ def make_worm_pixmap(size: int = 72) -> QPixmap:
     return pm
 
 
+def app_icon_pixmap(entry: "AppEntry", size: int = 64) -> QPixmap:
+    """App tile icon: load assets/<icon>, fall back to a procedural glyph."""
+    if entry.icon:
+        path = ROOT_DIR / "assets" / entry.icon
+        if path.exists():
+            pm = QPixmap(str(path))
+            if not pm.isNull():
+                return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return make_glyph_pixmap(entry.glyph, entry.accent, size)
+
+
 def make_glyph_pixmap(text: str, accent_hex: str, size: int = 64) -> QPixmap:
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -385,7 +401,7 @@ class AppCard(QFrame):
         header.setSpacing(14)
 
         glyph = QLabel()
-        glyph.setPixmap(make_glyph_pixmap(entry.glyph, entry.accent))
+        glyph.setPixmap(app_icon_pixmap(entry))
         glyph.setFixedSize(64, 64)
         header.addWidget(glyph)
 

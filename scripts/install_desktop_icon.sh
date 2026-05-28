@@ -127,11 +127,21 @@ if [[ -f "${ROOT_DIR}/assets/worm.png" ]]; then
 else
   gen_icon "${ICONS_DIR}/elp-3d-launcher.png" "WS" "#3DF5A1"
 fi
+# App icons: prefer the generated assets/icon_*.png, fall back to glyphs.
+app_icon() {
+  local out="$1" asset="$2" glyph="$3" accent="$4"
+  if [[ -f "${ROOT_DIR}/assets/${asset}" ]]; then
+    cp "${ROOT_DIR}/assets/${asset}" "${out}"
+    echo "  ${out} (${asset})"
+  else
+    gen_icon "${out}" "${glyph}" "${accent}"
+  fi
+}
 if [[ "${INSTALL_ALL}" -eq 1 ]]; then
-  gen_icon "${ICONS_DIR}/elp-3d-calib.png"   "CAL" "#4FC3F7"
-  gen_icon "${ICONS_DIR}/elp-3d-detect.png"  "DET" "#81C784"
-  gen_icon "${ICONS_DIR}/elp-3d-handeye.png" "H-E" "#FFB74D"
-  gen_icon "${ICONS_DIR}/elp-3d-robot.png"   "BOT" "#E57373"
+  app_icon "${ICONS_DIR}/elp-3d-calib.png"   "icon_calib.png"   "CAL" "#00E5FF"
+  app_icon "${ICONS_DIR}/elp-3d-detect.png"  "icon_detect.png"  "DET" "#3DF5A1"
+  app_icon "${ICONS_DIR}/elp-3d-handeye.png" "icon_handeye.png" "H-E" "#FFC24B"
+  app_icon "${ICONS_DIR}/elp-3d-robot.png"   "icon_robot.png"   "BOT" "#FF4D6D"
 fi
 
 echo "Writing .desktop entries:"
