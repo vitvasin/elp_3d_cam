@@ -27,6 +27,22 @@ class MG400Node(Node):
         self.act_mov_j = ActionClient(self, MovJ, "/mg400/mov_j")
         self.act_mov_l = ActionClient(self, MovL, "/mg400/mov_l")
 
+    def service_readiness(self):
+        """Map of MG400 service name -> matched-server availability.
+
+        Uses ``service_is_ready()`` (a real server match), not graph name
+        presence: our own clients register the names even when no server
+        exists, so name-based checks give false positives.
+        """
+        return {
+            "/mg400/clear_error": self.cli_clear_error.service_is_ready(),
+            "/mg400/enable_robot": self.cli_enable.service_is_ready(),
+            "/mg400/disable_robot": self.cli_disable.service_is_ready(),
+            "/mg400/get_pose": self.cli_pose.service_is_ready(),
+            "/mg400/do_execute": self.cli_do.service_is_ready(),
+            "/mg400/tool_do_execute": self.cli_tool_do.service_is_ready(),
+        }
+
     def call_simple_service_async(self, client, request, name, on_done=None, timeout=2.0):
         """Call a simple MG400 service and report ``(ok, msg)``."""
         if not client.service_is_ready():

@@ -102,6 +102,9 @@ Override the device in `config/default.yaml` if needed.
    center, and auto-collection accepts only one ArUco observation per grid pose.
    Its right-side Robot Control panel can launch/stop MG400
    bringup, clear/enable/disable the robot, read pose, and send a basic MoveJ.
+   Bringup is launched in its own process group and fully stopped (SIGINT →
+   SIGTERM → SIGKILL on the whole node tree) when stopped or when the app
+   closes, so no MG400 nodes are left orphaned.
 5. **Runtime pick flow** — `app_detect.py` auto-loads `config/hand_eye.yaml`
    and publishes detections in `robot_base` when ROS2 is enabled. Then run
    `app_robot_control.py` to consume `/elp/detections` and execute MG400

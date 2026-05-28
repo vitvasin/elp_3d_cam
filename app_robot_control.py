@@ -5,6 +5,8 @@ Consumes ``vision_msgs/Detection3DArray`` from ``app_detect.py`` and executes a
 simple pick/place sequence with the MG400 ROS2 action/services.
 """
 
+import os
+import signal
 import sys
 import threading
 import time
@@ -130,6 +132,7 @@ class RobotControlWindow(QMainWindow):
         self.resize(720, 680)
         self.node = None
         self.spin = None
+        self.robot_lock = threading.Lock()
         self.busy = False
         self.detections = []
         self.hand_eye_T = None
@@ -1520,6 +1523,15 @@ class RobotControlWindow(QMainWindow):
         if self.bringup_proc and self.bringup_proc.poll() is None:
             self.append_log("MG400 bringup already running from this app.")
             return
+        if self.node is not None:
+            ready, _msg, _names = self.mg400_service_status()
+            if ready:
+                self.append_log(
+                    "MG400 services already available (external bringup); "
+                    "not launching a duplicate."
+                )
+                self.bringup_status.setText("Bringup: already running (external)")
+                return
         ip = self.robot_ip.text().strip() or "192.168.1.6"
         cmd = [
             "ros2", "launch", "mg400_bringup", "mg400_gui.launch.py",
@@ -1532,6 +1544,9 @@ class RobotControlWindow(QMainWindow):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                # Own session/process group so we can signal the whole
+                # ros2-launch node tree, not just the launch parent.
+                start_new_session=True,
             )
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"Launch bringup failed: {exc}")
@@ -1555,32 +1570,42 @@ class RobotControlWindow(QMainWindow):
                 self.log_received.emit("[bringup] " + line)
 
     def stop_bringup(self, silent=False):
-        if not self.bringup_proc or self.bringup_proc.poll() is not None:
+        proc = self.bringup_proc
+        if not proc or proc.poll() is not None:
             if not silent:
                 self.append_log("No bringup process started by this app.")
             return
-        self.bringup_proc.terminate()
-        try:
-            self.bringup_proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            self.bringup_proc.kill()
         self.bringup_ready_checks_remaining = 0
+        # ros2 launch spawns a tree of nodes; signal the whole process group
+        # so children don't survive as orphans. SIGINT first for a clean ROS
+        # shutdown, then escalate.
+        try:
+            pgid = os.getpgid(proc.pid)
+            signals = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
+            for sig in signals:
+                if proc.poll() is not None:
+                    break
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    proc.wait(timeout=8.0 if sig == signal.SIGINT else 3.0)
+                except subprocess.TimeoutExpired:
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"Stop bringup error: {exc}")
+            proc.kill()
         self.bringup_status.setText("Bringup: stopped")
-        self.append_log("Stopped MG400 bringup process.")
+        if not silent:
+            self.append_log("Stopped MG400 bringup process group.")
 
     def mg400_service_status(self):
         if self.node is None:
             return False, "ROS2 node is not running", []
         names = sorted(name for name, _types in self.node.get_service_names_and_types())
-        needed = [
-            "/mg400/clear_error",
-            "/mg400/enable_robot",
-            "/mg400/disable_robot",
-            "/mg400/get_pose",
-            "/mg400/do_execute",
-            "/mg400/tool_do_execute",
-        ]
-        missing = [name for name in needed if name not in names]
+        ready_map = self.node.service_readiness()
+        missing = [name for name, ok in ready_map.items() if not ok]
         if not missing:
             return True, "MG400 services ready", names
         return False, "Missing: " + ", ".join(missing), names
@@ -1612,19 +1637,11 @@ class RobotControlWindow(QMainWindow):
             QMessageBox.warning(self, "ROS2", msg)
             return
         self.bringup_status.setText(f"Bringup: {'ready' if ready else msg}")
-        needed = [
-            "/mg400/clear_error",
-            "/mg400/enable_robot",
-            "/mg400/disable_robot",
-            "/mg400/get_pose",
-            "/mg400/do_execute",
-            "/mg400/tool_do_execute",
-        ]
-        for name in needed:
-            self.append_log(f"{name}: {'OK' if name in names else 'MISSING'}")
+        for name, ok in self.node.service_readiness().items():
+            self.append_log(f"{name}: {'OK (server matched)' if ok else 'MISSING (no server)'}")
         visible = [n for n in names if "mg400" in n or n in {"/enable_robot", "/disable_robot", "/clear_error"}]
         if visible:
-            self.append_log("Visible MG400-like services: " + ", ".join(visible))
+            self.append_log("Graph names (may include our own clients): " + ", ".join(visible))
         else:
             self.append_log("No MG400 services visible. Start bringup or source the ROS workspace.")
 
@@ -1677,7 +1694,21 @@ class RobotControlWindow(QMainWindow):
         if self.node is None:
             QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
             return
-        self.node.request_pose_async(lambda pose, err: self.pose_received.emit(pose, err))
+        threading.Thread(target=self._read_pose_worker, daemon=True).start()
+
+    def _read_pose_worker(self):
+        evt = threading.Event()
+        out = {"pose": None, "err": "timeout"}
+
+        def done(pose, err):
+            out["pose"] = pose
+            out["err"] = err
+            evt.set()
+
+        with self.robot_lock:
+            self.node.request_pose_async(done)
+            evt.wait(timeout=5.0)
+        self.pose_received.emit(out["pose"], out["err"])
 
     def on_pose_received(self, pose, err):
         if pose is None:
@@ -1758,16 +1789,32 @@ class RobotControlWindow(QMainWindow):
         if self.node is None:
             QMessageBox.warning(self, "ROS2", "ROS2/MG400 messages are not available.")
             return
+        threading.Thread(
+            target=self._state_cmd_worker, args=(command,), daemon=True
+        ).start()
+
+    def _state_cmd_worker(self, command):
+        evt = threading.Event()
+        out = {"ok": False, "msg": "timeout"}
 
         def done(ok, msg):
-            self.log_received.emit(f"{command}: {'ok' if ok else msg}")
+            out["ok"] = bool(ok)
+            out["msg"] = msg
+            evt.set()
 
-        if command == "clear":
-            self.node.clear_error_async(done)
-        elif command == "enable":
-            self.node.enable_robot_async(done)
-        elif command == "disable":
-            self.node.disable_robot_async(done)
+        # MG400 cold enable can take 5-15 s; disable is fast.
+        wait_s = 30.0 if command in ("enable", "clear") else 10.0
+        with self.robot_lock:
+            if command == "clear":
+                self.node.clear_error_async(done)
+            elif command == "enable":
+                self.node.enable_robot_async(done)
+            elif command == "disable":
+                self.node.disable_robot_async(done)
+            else:
+                return
+            evt.wait(timeout=wait_s)
+        self.log_received.emit(f"{command}: {'ok' if out['ok'] else out['msg']}")
 
     def add_place_point(self):
         self.place_points.append((
@@ -1954,10 +2001,11 @@ class RobotControlWindow(QMainWindow):
             f"{'MovL' if linear else 'MovJ'} ({x:.4f}, {y:.4f}, {z:.4f}) "
             f"s={speed} a={accel}"
         )
-        self.node.move_cartesian_async(
-            x, y, z, r, is_linear=linear, on_done=done, speed=speed, accel=accel
-        )
-        evt.wait(timeout=30.0)
+        with self.robot_lock:
+            self.node.move_cartesian_async(
+                x, y, z, r, is_linear=linear, on_done=done, speed=speed, accel=accel
+            )
+            evt.wait(timeout=30.0)
         if not out["ok"]:
             self._log(f"Move failed: {out['msg']}")
         return out["ok"]
@@ -1972,8 +2020,9 @@ class RobotControlWindow(QMainWindow):
             evt.set()
 
         self._log(f"DO {'tool' if use_tool else 'base'}[{idx}]={state}")
-        self.node.set_do_async(use_tool, idx, state, on_done=done)
-        evt.wait(timeout=5.0)
+        with self.robot_lock:
+            self.node.set_do_async(use_tool, idx, state, on_done=done)
+            evt.wait(timeout=5.0)
         if not out["ok"]:
             self._log(f"DO failed: {out['msg']}")
         return out["ok"]
@@ -1992,6 +2041,11 @@ class RobotControlWindow(QMainWindow):
             self.spin.stop()
         if self.node:
             self.node.destroy_node()
+        if ROS_OK and rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
         event.accept()
 
 

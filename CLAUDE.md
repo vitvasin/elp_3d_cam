@@ -48,6 +48,25 @@ device that streams a hardware-synchronized side-by-side (SBS) wide frame
    clear-error/enable/disable, camera-click pick testing, and an auto loop with editable place points.
 5. Saves home pose and robot-control preferences to `config/robot_control.yaml`.
 
+**App 4 robot-comms robustness (important for "robot not responding"):**
+- All robot calls (move, DO, enable/disable/clear, get_pose) are serialized
+  through a single `self.robot_lock` and run on worker threads. This prevents
+  concurrent commands on the MG400's single TCP channel (overlapping
+  enable→move was dropping the connection) and keeps the Qt GUI responsive.
+  The lock is only ever acquired off the GUI thread — never hold it in
+  GUI-thread code (e.g. `mg400_service_status` is deliberately unlocked).
+- Bringup readiness uses `MG400Node.service_readiness()` →
+  `client.service_is_ready()` (a matched **server**), NOT graph name presence:
+  the app's own service clients register the `/mg400/*` names even with no
+  server, so name-based checks give false "available". `check_services` prints
+  `OK (server matched)` vs `MISSING (no server)`.
+- `launch_bringup` runs `ros2 launch mg400_bringup mg400_gui.launch.py` in its
+  own session (`start_new_session=True`); `stop_bringup` group-kills the whole
+  node tree (SIGINT→SIGTERM→SIGKILL) so children don't orphan. `closeEvent`
+  stops bringup, spin thread, destroys the node, and calls `rclpy.shutdown()`.
+- Enable/clear wait up to 30 s (MG400 cold enable is slow); disable 10 s;
+  move 30 s; DO 5 s.
+
 ## Hardware
 
 - **Camera device:** auto-detected via `/dev/v4l/by-id/` symlink containing
