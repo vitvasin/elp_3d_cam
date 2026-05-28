@@ -120,7 +120,13 @@ EOF
 }
 
 echo "Generating icons in ${ICONS_DIR} ..."
-gen_icon "${ICONS_DIR}/elp-3d-launcher.png" "ELP" "#4FC3F7"
+# Launcher icon: prefer the worm mascot image, fall back to a generated glyph.
+if [[ -f "${ROOT_DIR}/assets/worm.png" ]]; then
+  cp "${ROOT_DIR}/assets/worm.png" "${ICONS_DIR}/elp-3d-launcher.png"
+  echo "  ${ICONS_DIR}/elp-3d-launcher.png (worm)"
+else
+  gen_icon "${ICONS_DIR}/elp-3d-launcher.png" "WS" "#3DF5A1"
+fi
 if [[ "${INSTALL_ALL}" -eq 1 ]]; then
   gen_icon "${ICONS_DIR}/elp-3d-calib.png"   "CAL" "#4FC3F7"
   gen_icon "${ICONS_DIR}/elp-3d-detect.png"  "DET" "#81C784"
@@ -130,8 +136,8 @@ fi
 
 echo "Writing .desktop entries:"
 write_entry "elp-3d-launcher" \
-  "ELP 3D Camera Launcher" \
-  "Launcher for the ELP 3D stereo camera app suite" \
+  "Worm Sorter" \
+  "Worm Sorter launcher for the ELP 3D stereo camera app suite" \
   "launcher.py" \
   "${ICONS_DIR}/elp-3d-launcher.png"
 

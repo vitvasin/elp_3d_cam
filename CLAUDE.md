@@ -70,7 +70,10 @@ app.py                          App 1 entry. Calibration + depth viewer.
 app_detect.py                   App 2 entry. Detection + ROS2 publisher. Deep-merges detect.yaml.
 app_handeye.py                  App 3 entry. ELP stereo depth + MG400 pose hand-eye calibration.
 app_robot_control.py            App 4 entry. Consumes /elp/detections and drives MG400 pick/place.
+launcher.py                     "Worm Sorter" GUI launcher. Starts each app via QProcess, or all (Launch All). Uses assets/worm.png (procedural fallback).
+assets/worm.png                 Worm mascot image (codex-generated, 512x512 RGBA) used by launcher header + window/desktop icon.
 scripts/add_app_aliases.sh      Idempotently adds elp-calib/detect/handeye/robot aliases to ~/.bashrc.
+scripts/install_desktop_icon.sh Installs .desktop entries for the launcher (+ apps via --all). Launcher entry name "Worm Sorter", worm.png icon.
 config/default.yaml             Camera + depth + calibration board params.
 config/saved_params.yaml        GUI-saved camera/depth overrides. Auto-merged on startup. In .gitignore.
 config/detect.yaml              Detection + ROS2 + optimization params (App 2 overlay).

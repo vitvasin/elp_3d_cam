@@ -41,11 +41,18 @@ sudo usermod -aG video "$USER"   # then log out / back in
 ## Run
 
 ```bash
+python launcher.py        # Worm Sorter — GUI launcher for all apps below
 python app.py             # stereo calibration + depth viewer
 python app_detect.py      # detection + ROS2 Detection3DArray publisher
 python app_handeye.py     # ELP camera <-> MG400 hand-eye calibration
 python app_robot_control.py  # MG400 pick controller for /elp/detections
 ```
+
+`launcher.py` (**Worm Sorter**) is a futuristic launcher GUI that starts any of
+the four apps in its own process, or all at once via **Launch All**. It uses the
+worm mascot at `assets/worm.png` (falls back to a procedural drawing if absent).
+Install it to the application menu / desktop with
+`scripts/install_desktop_icon.sh` (`--all` also adds the four apps).
 
 Optional shell aliases:
 
