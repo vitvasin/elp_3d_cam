@@ -35,7 +35,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QSplitter,
     QStatusBar,
     QTabWidget,
     QTableWidget,
@@ -611,10 +613,16 @@ class RobotControlWindow(QMainWindow):
     def build_camera_pick_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        layout.addWidget(splitter)
 
         self.pick_image = ImagePanel("Camera Pick - Rectified Left")
         self.pick_image.clicked.connect(self.on_camera_pick_click)
-        layout.addWidget(self.pick_image, 2)
+        self.pick_image.setMinimumWidth(320)
+        self.pick_image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        splitter.addWidget(self.pick_image)
 
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
@@ -728,7 +736,12 @@ class RobotControlWindow(QMainWindow):
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setWidget(controls)
         controls_scroll.setMinimumWidth(360)
-        layout.addWidget(controls_scroll, 1)
+        splitter.addWidget(controls_scroll)
+
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([480, 720])
+        self.camera_pick_splitter = splitter
 
         return tab
 
@@ -1308,14 +1321,27 @@ class RobotControlWindow(QMainWindow):
             return
         if self.busy:
             return
+        if not self.home_pose:
+            QMessageBox.information(
+                self, "Camera Pick",
+                "Save a home pose first — pick releases at the home position."
+            )
+            return
         params = self.pick_params(use_place_list=False)
         if params is None:
             return
         params["r"] = self.click_r.value()
         target = self.clicked_robot["robot_m"]
         params["approach_z"] = target[2] + self.click_approach_z.value() / 1000.0
-        params["release_at_approach"] = True
+        params["place"] = (
+            float(self.home_pose["x"]),
+            float(self.home_pose["y"]),
+            float(self.home_pose["z"]),
+        )
+        params["place_i"] = None
+        params["release_at_approach"] = False
         params["linear"] = self.click_move_type.currentText() == "MovL"
+        params["place_linear"] = False
         params["speed"] = self.click_speed.value()
         params["accel"] = self.click_accel.value()
         params["near_approach_z"] = target[2] + self.click_near_approach_z.value() / 1000.0
@@ -1382,6 +1408,7 @@ class RobotControlWindow(QMainWindow):
         params["approach_z"] = target["robot_m"][2] + self.click_approach_z.value() / 1000.0
         params["release_at_approach"] = False
         params["linear"] = self.click_move_type.currentText() == "MovL"
+        params["place_linear"] = False
         params["speed"] = self.click_speed.value()
         params["accel"] = self.click_accel.value()
         params["near_approach_z"] = target["robot_m"][2] + self.click_near_approach_z.value() / 1000.0
@@ -1952,6 +1979,7 @@ class RobotControlWindow(QMainWindow):
         near_z = params.get("near_approach_z")
         near_speed = params.get("near_speed", speed)
         near_accel = params.get("near_accel", accel)
+        place_linear = params.get("place_linear", linear)
         descend_speed = near_speed if near_z is not None else speed
         descend_accel = near_accel if near_z is not None else accel
         try:
@@ -1974,7 +2002,7 @@ class RobotControlWindow(QMainWindow):
                 return
             if not params.get("release_at_approach"):
                 if not self._move(place[0], place[1], place[2], r,
-                                  linear=linear, speed=speed, accel=accel):
+                                  linear=place_linear, speed=speed, accel=accel):
                     return
             self._set_do(use_tool, idx, open_state)
             self._log("Pick/place complete")

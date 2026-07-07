@@ -343,10 +343,12 @@ Calibration safety:
   `near_speed`/`near_accel`. On short moves the robot is acceleration-limited
   (never reaches cruise speed), so `near_accel` is the knob that visibly slows
   the grasp; raise `near_approach_z_mm` to lengthen the slow segment.
-  `Pick Clicked` releases the object at the approach point
-  (`release_at_approach` param skips the place move); the Pick/Auto tabs still
-  move to their place point and stay single-phase (`near_approach_z`/
-  `near_speed`/`near_accel` params absent). Camera Pick moves use per-tab
+  `Pick Clicked` lifts to the approach point, moves to the saved Manual-tab
+  home pose, then opens the gripper to release (matches the Pellet Home Loop;
+  `place` is set to the home XYZ, `release_at_approach=False`). A home pose
+  must be saved first or the pick is refused. The Pick/Auto tabs still move
+  to their place point and stay single-phase (`near_approach_z`/`near_speed`/
+  `near_accel` params absent). Camera Pick moves use per-tab
   Speed/Near-speed/Accel/Near-accel ratios (1-100 %) and a MovJ/MovL selector
   (config `move_type`); these flow through `move_cartesian_async` into the
   MovJ/MovL action goal's `set_speed_*`/`set_acc_*` fields. The
